@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="purple_700">#FF6200EE</color>
+    <color name="teal_200">#FF03DAC5</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="status_idle">#FF9E9E9E</color>
+    <color name="status_capturing">#FF2196F3</color>
+    <color name="status_analyzing">#FFFFC107</color>
+    <color name="result_real">#FF4CAF50</color>
+    <color name="result_fake">#FFF44336</color>
+    <color name="dark_bg">#FF1A1A2E</color>
+    <color name="card_bg">#FF16213E</color>
+    <color name="accent">#FF0F3460</color>
+    <color name="accent_bright">#FFE94560</color>
+    <color name="overlay_bg">#E6202030</color>
+    <color name="overlay_border">#40FFFFFF</color>
+    <color name="btn_start_bg">#FF2E7D32</color>
+    <color name="btn_stop_bg">#FFC62828</color>
+</resources>

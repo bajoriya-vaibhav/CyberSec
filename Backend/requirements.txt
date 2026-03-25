@@ -1,0 +1,14 @@
+gradio
+transformers
+torch
+pillow
+numpy
+moviepy==1.0.3
+librosa
+opencv-python
+tf-keras
+onnxruntime
+google-genai
+fastapi
+uvicorn[standard]
+python-multipart

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Deepfake Capture</string>
+    <string name="permission_subtitle">Getting permission…</string>
+    <string name="hint_server_url">Server URL</string>
+    <string name="btn_start">Start</string>
+    <string name="btn_stop">Stop</string>
+    <string name="status_idle">Idle</string>
+    <string name="status_capturing">Capturing…</string>
+    <string name="status_analyzing">Analyzing…</string>
+    <string name="notification_channel_name">Capture Service</string>
+    <string name="notification_channel_desc">Shows when screen capture is active</string>
+    <string name="notification_title">Deepfake Capture Active</string>
+    <string name="notification_text">Capturing screen and audio…</string>
+    <string name="overlay_title">Deepfake Detector</string>
+</resources>
