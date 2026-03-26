@@ -32,8 +32,8 @@ class OverlayManager(private val context: Context) {
         private const val TAG = "OverlayManager"
         private const val PREFS_NAME = "deepfake_prefs"
         private const val KEY_SERVER_URL = "server_url"
-        private const val CYCLE_FRAME_COUNT = 30          // Frames per cycle
-        private const val CYCLE_DURATION_MS = 30_000L     // Max cycle duration in ms
+        private const val CYCLE_FRAME_COUNT = 5            // Frames per cycle
+        private const val CYCLE_DURATION_MS = 5_000L      // Max cycle duration in ms
         private const val MAX_HISTORY = 5                 // Keep last N cycle summaries
     }
 
