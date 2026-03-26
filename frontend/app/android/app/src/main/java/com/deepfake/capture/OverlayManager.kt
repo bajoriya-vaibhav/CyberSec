@@ -421,14 +421,25 @@ class OverlayManager(private val context: Context) {
         // Inference time
         inferenceLabel?.text = "${"%.0f".format(summary.avgInferenceMs)}ms avg inference"
 
-        // Subtle panel background tint
-        panelView?.background = makeRoundedRect(
-            when {
-                isReal -> "#0A66BB6A"
-                isSuspicious -> "#0AFFA726"
-                else -> "#0AEF5350"
-            }, 20
-        )
+        // Subtle panel background tint — keep opaque base with colored overlay
+        panelView?.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(16).toFloat()
+            setColor(Color.parseColor(
+                when {
+                    isReal -> "#F0121620"
+                    isSuspicious -> "#F0141820"
+                    else -> "#F0181215"
+                }
+            ))
+            setStroke(dp(1), Color.parseColor(
+                when {
+                    isReal -> "#2066BB6A"
+                    isSuspicious -> "#20FFA726"
+                    else -> "#20EF5350"
+                }
+            ))
+        }
 
         statusDot?.background = makeDot(color)
         statusText?.text = when {
@@ -470,11 +481,15 @@ class OverlayManager(private val context: Context) {
     private fun showBubble() {
         val bubble = TextView(context).apply {
             text = "🛡️"
-            textSize = 24f
+            textSize = 22f
             gravity = Gravity.CENTER
-            setPadding(dp(4), dp(4), dp(4), dp(4))
-            background = makeRoundedRect("#E6181825", 50)
-            elevation = dp(8).toFloat()
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#F0141420"))
+                setStroke(dp(1), Color.parseColor("#30FFFFFF"))
+            }
+            elevation = dp(10).toFloat()
         }
 
         bubbleParams = WindowManager.LayoutParams(
@@ -607,43 +622,65 @@ class OverlayManager(private val context: Context) {
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            background = makeRoundedRect("#E6181825", 20)
-            elevation = dp(12).toFloat()
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(16).toFloat()
+                setColor(Color.parseColor("#F0121218"))
+                setStroke(dp(1), Color.parseColor("#25FFFFFF"))
+            }
+            elevation = dp(16).toFloat()
         }
 
-        // ── Header row: title + close button
+        // ── Header row: title + minimize + close
         val header = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(2))
         }
 
         val title = TextView(context).apply {
             text = "🛡️ DeepFake Detector"
-            setTextColor(Color.WHITE)
-            textSize = 15f
+            setTextColor(Color.parseColor("#F0F0F0"))
+            textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         header.addView(title)
 
         val minimizeBtn = TextView(context).apply {
-            text = "—"
-            setTextColor(Color.parseColor("#80FFFFFF"))
-            textSize = 16f
+            text = "–"
+            setTextColor(Color.parseColor("#99FFFFFF"))
+            textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setPadding(dp(8), 0, dp(8), 0)
+            val btnBg = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(6).toFloat()
+                setColor(Color.parseColor("#18FFFFFF"))
+            }
+            background = btnBg
+            setPadding(dp(10), dp(2), dp(10), dp(2))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(6) }
             setOnClickListener { toggleExpand() }
         }
         header.addView(minimizeBtn)
 
         val closeBtn = TextView(context).apply {
             text = "✕"
-            setTextColor(Color.parseColor("#80FFFFFF"))
-            textSize = 18f
+            setTextColor(Color.parseColor("#99FFFFFF"))
+            textSize = 15f
             gravity = Gravity.CENTER
-            setPadding(dp(8), 0, 0, 0)
+            val btnBg = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(6).toFloat()
+                setColor(Color.parseColor("#18FFFFFF"))
+            }
+            background = btnBg
+            setPadding(dp(10), dp(4), dp(10), dp(4))
             setOnClickListener { onCloseOverlay?.invoke() }
         }
         header.addView(closeBtn)
@@ -656,7 +693,7 @@ class OverlayManager(private val context: Context) {
         val statusRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(6), 0, dp(2))
+            setPadding(0, dp(8), 0, dp(4))
         }
 
         statusDot = View(context).apply {
@@ -669,8 +706,8 @@ class OverlayManager(private val context: Context) {
 
         statusText = TextView(context).apply {
             text = if (isCapturing) "Capturing…" else "Idle"
-            setTextColor(Color.parseColor("#B0BEC5"))
-            textSize = 13f
+            setTextColor(Color.parseColor("#CFD8DC"))
+            textSize = 12f
         }
         statusRow.addView(statusText)
         root.addView(statusRow)
@@ -689,17 +726,25 @@ class OverlayManager(private val context: Context) {
         progressBarTrack = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(4)
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(3)
             ).apply {
-                bottomMargin = dp(6)
+                bottomMargin = dp(8)
             }
-            background = makeRoundedRect("#20FFFFFF", 4)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(3).toFloat()
+                setColor(Color.parseColor("#1AFFFFFF"))
+            }
             visibility = if (isCapturing) View.VISIBLE else View.GONE
         }
 
         progressBar = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(4))
-            background = makeRoundedRect("#4FC3F7", 4)
+            layoutParams = LinearLayout.LayoutParams(0, dp(3))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(3).toFloat()
+                setColor(Color.parseColor("#4FC3F7"))
+            }
         }
         (progressBarTrack as LinearLayout).addView(progressBar)
         root.addView(progressBarTrack)
@@ -760,14 +805,19 @@ class OverlayManager(private val context: Context) {
         // Frame breakdown card
         breakdownCard = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = makeRoundedRect("#15FFFFFF", 10)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#1AFFFFFF"))
+                setStroke(1, Color.parseColor("#10FFFFFF"))
+            }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = dp(8)
-                bottomMargin = dp(4)
+                topMargin = dp(10)
+                bottomMargin = dp(6)
             }
         }
 
@@ -844,14 +894,19 @@ class OverlayManager(private val context: Context) {
 
         serverUrlInput = EditText(context).apply {
             setText(savedUrl)
-            setTextColor(Color.WHITE)
+            setTextColor(Color.parseColor("#E8E8E8"))
             textSize = 12f
             setHintTextColor(Color.parseColor("#40FFFFFF"))
             hint = "http://10.0.2.2:7860"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             imeOptions = EditorInfo.IME_ACTION_DONE
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            background = makeRoundedRect("#20FFFFFF", 8)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(8).toFloat()
+                setColor(Color.parseColor("#12FFFFFF"))
+                setStroke(1, Color.parseColor("#18FFFFFF"))
+            }
             isSingleLine = true
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -873,8 +928,12 @@ class OverlayManager(private val context: Context) {
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setPadding(dp(16), dp(10), dp(16), dp(10))
-            background = makeRoundedRect("#4CAF50", 12)
+            setPadding(dp(16), dp(11), dp(16), dp(11))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#2E7D32"))
+            }
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginEnd = dp(6)
             }
@@ -895,8 +954,12 @@ class OverlayManager(private val context: Context) {
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            setPadding(dp(16), dp(10), dp(16), dp(10))
-            background = makeRoundedRect("#EF5350", 12)
+            setPadding(dp(16), dp(11), dp(16), dp(11))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#C62828"))
+            }
             alpha = 0.4f
             isEnabled = false
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -936,10 +999,10 @@ class OverlayManager(private val context: Context) {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 1
             ).apply {
-                topMargin = dp(6)
-                bottomMargin = dp(2)
+                topMargin = dp(8)
+                bottomMargin = dp(4)
             }
-            setBackgroundColor(Color.parseColor("#15FFFFFF"))
+            setBackgroundColor(Color.parseColor("#20FFFFFF"))
         }
     }
 }
