@@ -6,6 +6,7 @@ import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
@@ -42,19 +43,25 @@ class AudioCapturer(
         }
         val bufferSize = maxOf(minBufferSize, SAMPLE_RATE * 2)
 
-        // Try playback capture first, then microphone fallback
-        audioRecord = try {
-            if (mediaProjection != null) {
+        // AudioPlaybackCapture requires API 29+; skip straight to mic on older devices
+        audioRecord = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mediaProjection != null) {
+            try {
                 createPlaybackCaptureRecord(bufferSize)
-            } else {
-                throw IllegalStateException("No MediaProjection available")
+            } catch (e: Throwable) {
+                Log.w(TAG, "AudioPlaybackCapture failed: ${e.message}, trying microphone fallback")
+                try {
+                    createMicrophoneRecord(bufferSize)
+                } catch (e2: Exception) {
+                    Log.e(TAG, "Microphone fallback also failed: ${e2.message}")
+                    null
+                }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "AudioPlaybackCapture failed: ${e.message}, trying microphone fallback")
+        } else {
+            Log.i(TAG, "API ${Build.VERSION.SDK_INT} < 29, using microphone fallback directly")
             try {
                 createMicrophoneRecord(bufferSize)
             } catch (e2: Exception) {
-                Log.e(TAG, "Microphone fallback also failed: ${e2.message}")
+                Log.e(TAG, "Microphone fallback failed: ${e2.message}")
                 null
             }
         }

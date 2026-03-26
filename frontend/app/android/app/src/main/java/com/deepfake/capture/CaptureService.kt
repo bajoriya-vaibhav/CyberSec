@@ -14,6 +14,7 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import kotlinx.coroutines.*
+import java.util.concurrent.CancellationException
 
 /**
  * Foreground service with two phases:
@@ -49,7 +50,11 @@ class CaptureService : Service() {
     private var apiClient: ApiClient? = null
     private var overlayManager: OverlayManager? = null
     private var captureJob: Job? = null
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Log.e(TAG, "Uncaught coroutine exception", throwable)
+        overlayManager?.updateStatus("❌ Error: ${throwable.message?.take(40)}")
+    }
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main + exceptionHandler)
 
     // Store MediaProjection token for later use
     private var storedResultCode: Int = Int.MIN_VALUE
@@ -151,8 +156,10 @@ class CaptureService : Service() {
                 withTimeout(HEALTH_CHECK_TIMEOUT_MS) {
                     client.checkHealth()
                 }
+            } catch (e: CancellationException) {
+                throw e  // Don't swallow coroutine cancellation
             } catch (e: Exception) {
-                Log.e(TAG, "Health check timeout", e)
+                Log.e(TAG, "Health check failed", e)
                 false
             }
 

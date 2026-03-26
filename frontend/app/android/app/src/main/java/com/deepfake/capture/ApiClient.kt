@@ -3,12 +3,15 @@ package com.deepfake.capture
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionSpec
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.TlsVersion
 import org.json.JSONObject
+import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -38,11 +41,24 @@ class ApiClient(private val serverUrl: String) {
         private const val TAG = "ApiClient"
     }
 
+    // Support both TLS 1.2 (Android 8.x) and TLS 1.3 (Android 10+)
+    private val tlsSpec = ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+        .tlsVersions(TlsVersion.TLS_1_2, TlsVersion.TLS_1_3)
+        .build()
+
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .connectionSpecs(listOf(tlsSpec, ConnectionSpec.CLEARTEXT))
+        .addInterceptor { chain ->
+            val request = chain.request().newBuilder()
+                .addHeader("ngrok-skip-browser-warning", "true")
+                .addHeader("User-Agent", "DeepFakeDetector/1.0")
+                .build()
+            chain.proceed(request)
+        }
         .build()
 
     /**
@@ -136,6 +152,8 @@ class ApiClient(private val serverUrl: String) {
                     "time=${result.inferenceTimeMs}ms)")
 
             result
+        } catch (e: CancellationException) {
+            throw e  // Don't swallow coroutine cancellation
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send prediction request", e)
             null
@@ -151,9 +169,12 @@ class ApiClient(private val serverUrl: String) {
             val url = serverUrl.trimEnd('/') + "/health"
             val request = Request.Builder().url(url).get().build()
             val response = client.newCall(request).execute()
+            val body = response.body?.string()
             val ok = response.isSuccessful
-            Log.i(TAG, "Health check: ${if (ok) "OK" else "FAIL (${response.code})"}")
+            Log.i(TAG, "Health check: ${if (ok) "OK" else "FAIL (${response.code})"} body=${body?.take(100)}")
             ok
+        } catch (e: CancellationException) {
+            throw e  // Don't swallow coroutine cancellation
         } catch (e: Exception) {
             Log.e(TAG, "Health check failed", e)
             false
