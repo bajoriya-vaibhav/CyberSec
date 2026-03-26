@@ -117,6 +117,11 @@ class CaptureService : Service() {
                 startService(stopIntent)
             }
 
+            overlayManager?.onCloseOverlay = {
+                Log.i(TAG, "Overlay: Close requested, completely stopping service")
+                stopSelf() // Stop the foreground service completely
+            }
+
             overlayManager?.show()
             Log.i(TAG, "Overlay shown, waiting for user action")
         }
@@ -249,7 +254,7 @@ class CaptureService : Service() {
 
                         if (result != null) {
                             consecutiveErrors = 0  // Reset error counter
-                            overlayManager?.updateResult(result)
+                            overlayManager?.accumulateResult(result)
                         } else {
                             consecutiveErrors++
                             if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {

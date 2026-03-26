@@ -15,15 +15,16 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 
 /**
  * Floating overlay with two states:
  *   • Collapsed: small draggable bubble icon
- *   • Expanded: panel with detailed detection results, server URL, start/stop controls
+ *   • Expanded: panel with cycle-based detection summary, server URL, start/stop controls
  *
- * Displays rich data from the backend: video/audio scores, security alerts,
- * inference time, RL weights, and fusion status.
+ * Accumulates per-frame results over 30-second cycles, then displays a structured
+ * briefing template with verdict, confidence, frame breakdown, alerts, and cycle history.
  */
 class OverlayManager(private val context: Context) {
 
@@ -31,6 +32,9 @@ class OverlayManager(private val context: Context) {
         private const val TAG = "OverlayManager"
         private const val PREFS_NAME = "deepfake_prefs"
         private const val KEY_SERVER_URL = "server_url"
+        private const val CYCLE_FRAME_COUNT = 30          // Frames per cycle
+        private const val CYCLE_DURATION_MS = 30_000L     // Max cycle duration in ms
+        private const val MAX_HISTORY = 5                 // Keep last N cycle summaries
     }
 
     private var windowManager: WindowManager? = null
@@ -45,21 +49,56 @@ class OverlayManager(private val context: Context) {
 
     // Panel UI references
     private var statusText: TextView? = null
-    private var resultText: TextView? = null
-    private var confidenceText: TextView? = null
-    private var scoresText: TextView? = null
-    private var alertText: TextView? = null
-    private var inferenceText: TextView? = null
+    private var progressText: TextView? = null
+    private var progressBar: View? = null
+    private var progressBarTrack: View? = null
+    private var verdictEmoji: TextView? = null
+    private var verdictLabel: TextView? = null
+    private var confidenceLabel: TextView? = null
+    private var breakdownCard: LinearLayout? = null
+    private var breakdownText: TextView? = null
+    private var scoresLine: TextView? = null
+    private var alertSection: TextView? = null
+    private var inferenceLabel: TextView? = null
+    private var historyStrip: TextView? = null
+    private var cycleCountLabel: TextView? = null
     private var serverUrlInput: EditText? = null
     private var startBtn: TextView? = null
     private var stopBtn: TextView? = null
     private var statusDot: View? = null
+
+    // Sections that should hide/show
+    private var resultSection: LinearLayout? = null
 
     private var isExpanded = false
     private var isCapturing = false
 
     var onStartCapture: ((serverUrl: String) -> Unit)? = null
     var onStopCapture: (() -> Unit)? = null
+    var onCloseOverlay: (() -> Unit)? = null
+
+    // ─── Cycle Accumulation ────────────────────────────────────
+
+    data class CycleSummary(
+        val cycleNumber: Int,
+        val verdict: String,           // "Real", "Fake", "Suspicious"
+        val avgConfidence: Float,
+        val realCount: Int,
+        val fakeCount: Int,
+        val suspiciousCount: Int,
+        val totalFrames: Int,
+        val avgVideoScore: Float?,
+        val avgAudioScore: Float?,
+        val alerts: List<String>,
+        val avgInferenceMs: Float,
+        val timestamp: Long
+    )
+
+    private val frameResults = mutableListOf<ApiClient.PredictionResult>()
+    private var cycleStartTime = 0L
+    private var currentCycleNumber = 0
+    private val cycleHistory = mutableListOf<CycleSummary>()
+    private var latestSummary: CycleSummary? = null
 
     // ─── dp/sp helper ──────────────────────────────────────────
     private fun dp(v: Int): Int =
@@ -88,114 +127,54 @@ class OverlayManager(private val context: Context) {
     fun updateStatus(status: String) {
         panelView?.post {
             statusText?.text = status
-            resultText?.text = ""
-            confidenceText?.text = ""
-            scoresText?.text = ""
-            alertText?.text = ""
-            alertText?.visibility = View.GONE
-            inferenceText?.text = ""
             statusDot?.background = makeDot(Color.parseColor("#4FC3F7"))
         }
-        // Also update bubble tint
         bubbleView?.post {
             (bubbleView as? TextView)?.setTextColor(Color.parseColor("#4FC3F7"))
         }
     }
 
     /**
-     * Display full prediction result from the backend.
+     * Accumulate a single per-frame result into the current cycle.
+     * After CYCLE_FRAME_COUNT frames or CYCLE_DURATION_MS ms, finalize
+     * the cycle and display the briefing template.
      */
-    fun updateResult(result: ApiClient.PredictionResult) {
-        val prediction = result.prediction
-        val confidence = result.confidence
-        val isReal = prediction.equals("Real", ignoreCase = true)
-        val isSuspicious = prediction.equals("Suspicious", ignoreCase = true)
-
-        val color = when {
-            isReal -> Color.parseColor("#66BB6A")       // Green
-            isSuspicious -> Color.parseColor("#FFA726")  // Orange
-            else -> Color.parseColor("#EF5350")          // Red
+    fun accumulateResult(result: ApiClient.PredictionResult) {
+        if (cycleStartTime == 0L) {
+            cycleStartTime = System.currentTimeMillis()
         }
 
-        val emoji = when {
-            isReal -> "✅"
-            isSuspicious -> "⚠️"
-            else -> "🚨"
-        }
+        frameResults.add(result)
 
+        val elapsed = System.currentTimeMillis() - cycleStartTime
+        val frameCount = frameResults.size
+
+        // Update live progress
         panelView?.post {
-            // Status line
-            statusText?.text = when {
-                isReal -> "Real Detected"
-                isSuspicious -> "Suspicious!"
-                else -> "Fake Detected"
-            }
-            statusText?.setTextColor(color)
-
-            // Main result
-            resultText?.text = "$emoji $prediction"
-            resultText?.setTextColor(color)
-
-            // Confidence
-            confidenceText?.text = "Confidence: ${"%.1f".format(confidence * 100)}%"
-
-            // Detailed scores
-            val scoreParts = mutableListOf<String>()
-            result.videoFakeScore?.let { scoreParts.add("Vid: ${"%.0f".format(it * 100)}%") }
-            result.audioFakeScore?.let { scoreParts.add("Aud: ${"%.0f".format(it * 100)}%") }
-            result.videoWeight?.let { w ->
-                scoreParts.add("W[v=${"%.0f".format(w * 100)}%]")
-            }
-            scoresText?.text = scoreParts.joinToString("  •  ")
-
-            // Security alert
-            if (result.securityAlert != null) {
-                alertText?.visibility = View.VISIBLE
-                val alertMsg = when (result.threatVector) {
-                    "FACE_SWAP_ATTACK" -> "⚠ Face swap detected!"
-                    "VOICE_CLONE_ATTACK" -> "⚠ Voice clone detected!"
-                    else -> when (result.securityAlert) {
-                        "MISMATCH_DETECTED" -> "⚠ Audio/video mismatch!"
-                        "LOW_CONFIDENCE" -> "⚠ Low confidence"
-                        else -> "⚠ ${result.securityAlert}"
-                    }
-                }
-                alertText?.text = alertMsg
-                alertText?.setTextColor(Color.parseColor("#FFA726"))
-            } else {
-                alertText?.visibility = View.GONE
-                alertText?.text = ""
-            }
-
-            // Inference time
-            inferenceText?.text = "${result.inferenceTimeMs.toInt()}ms • ${result.analysisSource}"
-
-            // Subtle panel background tint
-            panelView?.background = makeRoundedRect(
-                when {
-                    isReal -> "#0A66BB6A"
-                    isSuspicious -> "#0AFFA726"
-                    else -> "#0AEF5350"
-                }, 20
-            )
-
-            statusDot?.background = makeDot(color)
+            progressText?.visibility = View.VISIBLE
+            progressBarTrack?.visibility = View.VISIBLE
+            updateProgressUI(frameCount, CYCLE_FRAME_COUNT)
+            statusText?.text = "Analyzing…"
+            statusDot?.background = makeDot(Color.parseColor("#4FC3F7"))
         }
 
-        // Update bubble
-        bubbleView?.post {
-            (bubbleView as? TextView)?.apply {
-                text = emoji
-                setTextColor(color)
-            }
+        // Check if cycle is complete
+        if (frameCount >= CYCLE_FRAME_COUNT || elapsed >= CYCLE_DURATION_MS) {
+            finalizeCycle()
         }
     }
 
     /**
-     * Legacy method kept for backward compat — called by CaptureService.
+     * Legacy method — calls accumulateResult internally.
+     */
+    fun updateResult(result: ApiClient.PredictionResult) {
+        accumulateResult(result)
+    }
+
+    /**
+     * Legacy method for backward compat.
      */
     fun updateResult(prediction: String, confidence: Float) {
-        // Convert to a minimal PredictionResult
         val result = ApiClient.PredictionResult(
             prediction = prediction,
             confidence = confidence,
@@ -210,7 +189,7 @@ class OverlayManager(private val context: Context) {
             audioWeight = null,
             inferenceTimeMs = 0f
         )
-        updateResult(result)
+        accumulateResult(result)
     }
 
     fun setCapturingState(capturing: Boolean) {
@@ -226,6 +205,264 @@ class OverlayManager(private val context: Context) {
             }
             serverUrlInput?.isEnabled = !capturing
         }
+
+        if (capturing) {
+            // Reset accumulator for new session
+            resetAccumulator()
+            panelView?.post {
+                progressText?.visibility = View.VISIBLE
+                progressBarTrack?.visibility = View.VISIBLE
+                updateProgressUI(0, CYCLE_FRAME_COUNT)
+                showResultSection(false)
+                historyStrip?.visibility = View.GONE
+            }
+        } else {
+            panelView?.post {
+                progressText?.visibility = View.GONE
+                progressBarTrack?.visibility = View.GONE
+            }
+        }
+    }
+
+    // ─── Cycle Logic ───────────────────────────────────────────
+
+    private fun resetAccumulator() {
+        frameResults.clear()
+        cycleStartTime = 0L
+        currentCycleNumber = 0
+        cycleHistory.clear()
+        latestSummary = null
+    }
+
+    private fun finalizeCycle() {
+        if (frameResults.isEmpty()) return
+
+        currentCycleNumber++
+
+        // Count verdicts
+        var realCount = 0
+        var fakeCount = 0
+        var suspiciousCount = 0
+        var totalConfidence = 0f
+        var totalVideoScore = 0f
+        var videoScoreCount = 0
+        var totalAudioScore = 0f
+        var audioScoreCount = 0
+        var totalInferenceMs = 0f
+        val uniqueAlerts = mutableSetOf<String>()
+
+        for (r in frameResults) {
+            totalConfidence += r.confidence
+            totalInferenceMs += r.inferenceTimeMs
+
+            when {
+                r.prediction.equals("Real", ignoreCase = true) -> realCount++
+                r.prediction.equals("Suspicious", ignoreCase = true) -> suspiciousCount++
+                else -> fakeCount++
+            }
+
+            r.videoFakeScore?.let {
+                totalVideoScore += it
+                videoScoreCount++
+            }
+            r.audioFakeScore?.let {
+                totalAudioScore += it
+                audioScoreCount++
+            }
+            r.securityAlert?.let { uniqueAlerts.add(it) }
+            r.threatVector?.let { uniqueAlerts.add(it) }
+        }
+
+        val totalFrames = frameResults.size
+
+        // Majority vote for verdict
+        val verdict = when {
+            fakeCount >= realCount && fakeCount >= suspiciousCount -> "Fake"
+            suspiciousCount > realCount -> "Suspicious"
+            else -> "Real"
+        }
+
+        val summary = CycleSummary(
+            cycleNumber = currentCycleNumber,
+            verdict = verdict,
+            avgConfidence = totalConfidence / totalFrames,
+            realCount = realCount,
+            fakeCount = fakeCount,
+            suspiciousCount = suspiciousCount,
+            totalFrames = totalFrames,
+            avgVideoScore = if (videoScoreCount > 0) totalVideoScore / videoScoreCount else null,
+            avgAudioScore = if (audioScoreCount > 0) totalAudioScore / audioScoreCount else null,
+            alerts = uniqueAlerts.toList(),
+            avgInferenceMs = totalInferenceMs / totalFrames,
+            timestamp = System.currentTimeMillis()
+        )
+
+        latestSummary = summary
+        cycleHistory.add(summary)
+        if (cycleHistory.size > MAX_HISTORY) {
+            cycleHistory.removeAt(0)
+        }
+
+        // Reset for next cycle
+        frameResults.clear()
+        cycleStartTime = System.currentTimeMillis()
+
+        // Update UI
+        panelView?.post {
+            showCycleBriefing(summary)
+        }
+
+        // Update bubble
+        val emoji = when (verdict) {
+            "Real" -> "✅"
+            "Suspicious" -> "⚠️"
+            else -> "🚨"
+        }
+        val color = when (verdict) {
+            "Real" -> Color.parseColor("#66BB6A")
+            "Suspicious" -> Color.parseColor("#FFA726")
+            else -> Color.parseColor("#EF5350")
+        }
+        bubbleView?.post {
+            (bubbleView as? TextView)?.apply {
+                text = emoji
+                setTextColor(color)
+            }
+        }
+
+        Log.i(TAG, "Cycle #$currentCycleNumber finalized: $verdict " +
+                "(R=$realCount F=$fakeCount S=$suspiciousCount, " +
+                "conf=${"%.1f".format(summary.avgConfidence * 100)}%)")
+    }
+
+    // ─── UI Updates ────────────────────────────────────────────
+
+    private fun updateProgressUI(current: Int, total: Int) {
+        progressText?.text = "Analyzing: $current / $total frames"
+
+        // Update progress bar width
+        progressBar?.let { bar ->
+            progressBarTrack?.let { track ->
+                track.post {
+                    val trackWidth = track.width
+                    if (trackWidth > 0) {
+                        val fillWidth = (trackWidth * current.coerceAtMost(total)) / total
+                        val params = bar.layoutParams
+                        params.width = fillWidth.coerceAtLeast(0)
+                        bar.layoutParams = params
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showResultSection(visible: Boolean) {
+        resultSection?.visibility = if (visible) View.VISIBLE else View.GONE
+    }
+
+    private fun showCycleBriefing(summary: CycleSummary) {
+        showResultSection(true)
+
+        val isReal = summary.verdict == "Real"
+        val isSuspicious = summary.verdict == "Suspicious"
+
+        val color = when {
+            isReal -> Color.parseColor("#66BB6A")
+            isSuspicious -> Color.parseColor("#FFA726")
+            else -> Color.parseColor("#EF5350")
+        }
+
+        val emoji = when {
+            isReal -> "✅"
+            isSuspicious -> "⚠️"
+            else -> "🚨"
+        }
+
+        // Cycle label
+        cycleCountLabel?.text = "CYCLE RESULT — #${summary.cycleNumber}"
+        cycleCountLabel?.setTextColor(Color.parseColor("#80FFFFFF"))
+
+        // Verdict
+        verdictEmoji?.text = emoji
+        verdictLabel?.text = "${summary.verdict.uppercase()}"
+        verdictLabel?.setTextColor(color)
+
+        // Confidence
+        confidenceLabel?.text = "${"%.1f".format(summary.avgConfidence * 100)}% confidence"
+        confidenceLabel?.setTextColor(color)
+
+        // Frame breakdown
+        breakdownText?.text = "Real: ${summary.realCount}   Fake: ${summary.fakeCount}   Suspicious: ${summary.suspiciousCount}"
+
+        // Scores line
+        val scoreParts = mutableListOf<String>()
+        summary.avgVideoScore?.let { scoreParts.add("Avg Vid: ${"%.0f".format(it * 100)}%") }
+        summary.avgAudioScore?.let { scoreParts.add("Avg Aud: ${"%.0f".format(it * 100)}%") }
+        scoresLine?.text = if (scoreParts.isNotEmpty()) scoreParts.joinToString("   ") else "Scores: N/A"
+
+        // Alerts
+        if (summary.alerts.isEmpty()) {
+            alertSection?.text = "✓ No alerts detected"
+            alertSection?.setTextColor(Color.parseColor("#66BB6A"))
+        } else {
+            val alertStr = summary.alerts.joinToString("\n") { alert ->
+                when (alert) {
+                    "FACE_SWAP_ATTACK" -> "⚠ Face swap detected"
+                    "VOICE_CLONE_ATTACK" -> "⚠ Voice clone detected"
+                    "MISMATCH_DETECTED" -> "⚠ Audio/video mismatch"
+                    "LOW_CONFIDENCE" -> "⚠ Low confidence"
+                    else -> "⚠ $alert"
+                }
+            }
+            alertSection?.text = alertStr
+            alertSection?.setTextColor(Color.parseColor("#FFA726"))
+        }
+
+        // Inference time
+        inferenceLabel?.text = "${"%.0f".format(summary.avgInferenceMs)}ms avg inference"
+
+        // Subtle panel background tint
+        panelView?.background = makeRoundedRect(
+            when {
+                isReal -> "#0A66BB6A"
+                isSuspicious -> "#0AFFA726"
+                else -> "#0AEF5350"
+            }, 20
+        )
+
+        statusDot?.background = makeDot(color)
+        statusText?.text = when {
+            isReal -> "Real Detected"
+            isSuspicious -> "Suspicious!"
+            else -> "Fake Detected"
+        }
+        statusText?.setTextColor(color)
+
+        // History strip
+        updateHistoryStrip()
+
+        // Reset progress for next cycle
+        updateProgressUI(0, CYCLE_FRAME_COUNT)
+    }
+
+    private fun updateHistoryStrip() {
+        if (cycleHistory.size <= 1) {
+            historyStrip?.visibility = View.GONE
+            return
+        }
+
+        historyStrip?.visibility = View.VISIBLE
+        // Show all but the latest (which is the current one displayed)
+        val pastCycles = cycleHistory.dropLast(1).takeLast(4)
+        val historyStr = pastCycles.joinToString("   ") { cycle ->
+            val e = when (cycle.verdict) {
+                "Real" -> "✅"
+                "Suspicious" -> "⚠️"
+                else -> "🚨"
+            }
+            "#${cycle.cycleNumber} $e ${cycle.verdict}"
+        }
+        historyStrip?.text = "Past: $historyStr"
     }
 
     // ─── Collapsed Bubble ──────────────────────────────────────
@@ -313,7 +550,7 @@ class OverlayManager(private val context: Context) {
         val panel = buildPanelLayout()
 
         panelParams = WindowManager.LayoutParams(
-            dp(300),
+            dp(310),
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
@@ -330,6 +567,12 @@ class OverlayManager(private val context: Context) {
 
         // Refresh button state
         setCapturingState(isCapturing)
+
+        // If we have a previous summary, show it
+        latestSummary?.let { showCycleBriefing(it) }
+        if (isCapturing) {
+            updateProgressUI(frameResults.size, CYCLE_FRAME_COUNT)
+        }
     }
 
     private fun removePanel() {
@@ -338,11 +581,20 @@ class OverlayManager(private val context: Context) {
         }
         panelView = null
         statusText = null
-        resultText = null
-        confidenceText = null
-        scoresText = null
-        alertText = null
-        inferenceText = null
+        progressText = null
+        progressBar = null
+        progressBarTrack = null
+        verdictEmoji = null
+        verdictLabel = null
+        confidenceLabel = null
+        breakdownCard = null
+        breakdownText = null
+        scoresLine = null
+        alertSection = null
+        inferenceLabel = null
+        historyStrip = null
+        cycleCountLabel = null
+        resultSection = null
         serverUrlInput = null
         startBtn = null
         stopBtn = null
@@ -375,13 +627,24 @@ class OverlayManager(private val context: Context) {
         }
         header.addView(title)
 
+        val minimizeBtn = TextView(context).apply {
+            text = "—"
+            setTextColor(Color.parseColor("#80FFFFFF"))
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(8), 0, dp(8), 0)
+            setOnClickListener { toggleExpand() }
+        }
+        header.addView(minimizeBtn)
+
         val closeBtn = TextView(context).apply {
             text = "✕"
             setTextColor(Color.parseColor("#80FFFFFF"))
             textSize = 18f
             gravity = Gravity.CENTER
             setPadding(dp(8), 0, 0, 0)
-            setOnClickListener { toggleExpand() }
+            setOnClickListener { onCloseOverlay?.invoke() }
         }
         header.addView(closeBtn)
         root.addView(header)
@@ -412,54 +675,162 @@ class OverlayManager(private val context: Context) {
         statusRow.addView(statusText)
         root.addView(statusRow)
 
-        // ── Result + confidence
-        resultText = TextView(context).apply {
+        // ── Progress section (frame count + bar)
+        progressText = TextView(context).apply {
+            text = "Analyzing: 0 / $CYCLE_FRAME_COUNT frames"
+            setTextColor(Color.parseColor("#80FFFFFF"))
+            textSize = 11f
+            setPadding(0, dp(6), 0, dp(4))
+            visibility = if (isCapturing) View.VISIBLE else View.GONE
+        }
+        root.addView(progressText)
+
+        // Progress bar track
+        progressBarTrack = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(4)
+            ).apply {
+                bottomMargin = dp(6)
+            }
+            background = makeRoundedRect("#20FFFFFF", 4)
+            visibility = if (isCapturing) View.VISIBLE else View.GONE
+        }
+
+        progressBar = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(4))
+            background = makeRoundedRect("#4FC3F7", 4)
+        }
+        (progressBarTrack as LinearLayout).addView(progressBar)
+        root.addView(progressBarTrack)
+
+        // ── Result section (hidden until first cycle completes)
+        resultSection = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+
+        // Cycle label
+        cycleCountLabel = TextView(context).apply {
+            text = "CYCLE RESULT"
+            setTextColor(Color.parseColor("#80FFFFFF"))
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(4), 0, dp(4))
+            setLetterSpacing(0.1f)
+        }
+        resultSection!!.addView(cycleCountLabel)
+
+        // Verdict row (emoji + label)
+        val verdictRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(2), 0, 0)
+        }
+
+        verdictEmoji = TextView(context).apply {
+            text = ""
+            textSize = 28f
+            setPadding(0, 0, dp(10), 0)
+        }
+        verdictRow.addView(verdictEmoji)
+
+        val verdictCol = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        verdictLabel = TextView(context).apply {
             text = ""
             setTextColor(Color.WHITE)
-            textSize = 20f
+            textSize = 22f
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, dp(4), 0, 0)
         }
-        root.addView(resultText)
+        verdictCol.addView(verdictLabel)
 
-        confidenceText = TextView(context).apply {
+        confidenceLabel = TextView(context).apply {
             text = ""
             setTextColor(Color.parseColor("#B0FFFFFF"))
             textSize = 13f
-            setPadding(0, dp(2), 0, 0)
         }
-        root.addView(confidenceText)
+        verdictCol.addView(confidenceLabel)
 
-        // ── Detailed scores (video/audio/weights)
-        scoresText = TextView(context).apply {
+        verdictRow.addView(verdictCol)
+        resultSection!!.addView(verdictRow)
+
+        // Frame breakdown card
+        breakdownCard = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = makeRoundedRect("#15FFFFFF", 10)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+                bottomMargin = dp(4)
+            }
+        }
+
+        val breakdownLabel = TextView(context).apply {
+            text = "Frame Breakdown"
+            setTextColor(Color.parseColor("#60FFFFFF"))
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, dp(4))
+            setLetterSpacing(0.08f)
+        }
+        breakdownCard!!.addView(breakdownLabel)
+
+        breakdownText = TextView(context).apply {
+            text = ""
+            setTextColor(Color.parseColor("#E0FFFFFF"))
+            textSize = 12f
+        }
+        breakdownCard!!.addView(breakdownText)
+
+        scoresLine = TextView(context).apply {
             text = ""
             setTextColor(Color.parseColor("#80FFFFFF"))
             textSize = 11f
-            setPadding(0, dp(2), 0, 0)
+            setPadding(0, dp(3), 0, 0)
         }
-        root.addView(scoresText)
+        breakdownCard!!.addView(scoresLine)
 
-        // ── Security alert
-        alertText = TextView(context).apply {
+        resultSection!!.addView(breakdownCard)
+
+        // Alert section
+        alertSection = TextView(context).apply {
             text = ""
-            setTextColor(Color.parseColor("#FFA726"))
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, dp(4), 0, 0)
-            visibility = View.GONE
+            setPadding(0, dp(4), 0, dp(2))
         }
-        root.addView(alertText)
+        resultSection!!.addView(alertSection)
 
-        // ── Inference time
-        inferenceText = TextView(context).apply {
+        // Inference time
+        inferenceLabel = TextView(context).apply {
             text = ""
             setTextColor(Color.parseColor("#60FFFFFF"))
             textSize = 10f
             setPadding(0, dp(2), 0, dp(4))
         }
-        root.addView(inferenceText)
+        resultSection!!.addView(inferenceLabel)
 
-        // ── Divider
+        root.addView(resultSection)
+
+        // ── History strip divider + text
+        root.addView(makeDivider())
+
+        historyStrip = TextView(context).apply {
+            text = ""
+            setTextColor(Color.parseColor("#60FFFFFF"))
+            textSize = 10f
+            setPadding(0, dp(4), 0, dp(2))
+            visibility = View.GONE
+        }
+        root.addView(historyStrip)
+
+        // ── Divider before server
         root.addView(makeDivider())
 
         // ── Server URL
@@ -510,7 +881,6 @@ class OverlayManager(private val context: Context) {
             setOnClickListener {
                 val url = serverUrlInput?.text?.toString()?.trim() ?: ""
                 if (url.isNotBlank()) {
-                    // Save URL
                     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                         .edit().putString(KEY_SERVER_URL, url).apply()
                     onStartCapture?.invoke(url)

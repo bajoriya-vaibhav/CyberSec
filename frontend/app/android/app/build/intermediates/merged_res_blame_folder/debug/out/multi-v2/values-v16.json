@@ -4,7 +4,7 @@
             "outputFile": "com.deepfake.capture.app-mergeDebugResources-33:/values-v16/values-v16.xml",
             "map": [
                 {
-                    "source": "/Users/ajiteshkumarsingh/.gradle/caches/transforms-3/a37a69b4826a46e34160b54efe34ea95/transformed/core-1.12.0/res/values-v16/values-v16.xml",
+                    "source": "C:\\Users\\bajor\\.gradle\\caches\\transforms-3\\a37a69b4826a46e34160b54efe34ea95\\transformed\\core-1.12.0\\res\\values-v16\\values-v16.xml",
                     "from": {
                         "startLines": "2",
                         "startColumns": "4",
@@ -14,7 +14,7 @@
                     }
                 },
                 {
-                    "source": "/Users/ajiteshkumarsingh/.gradle/caches/transforms-3/795b370e74b337b819f768b029901e55/transformed/appcompat-1.6.1/res/values-v16/values-v16.xml",
+                    "source": "C:\\Users\\bajor\\.gradle\\caches\\transforms-3\\795b370e74b337b819f768b029901e55\\transformed\\appcompat-1.6.1\\res\\values-v16\\values-v16.xml",
                     "from": {
                         "startLines": "2",
                         "startColumns": "4",
