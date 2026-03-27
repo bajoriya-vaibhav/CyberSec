@@ -1,4 +1,4 @@
-name: df
+name: deepfake
 channels:
   - defaults
   - https://repo.anaconda.com/pkgs/main
