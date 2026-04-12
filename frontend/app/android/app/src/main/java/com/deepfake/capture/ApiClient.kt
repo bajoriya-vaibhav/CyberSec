@@ -17,23 +17,8 @@ import java.util.concurrent.TimeUnit
 /**
  * REST API client for the DeepFake Detection backend.
  *
- * Sends captured frames (JPEG) and audio segments (WAV) to:
- *   POST <serverUrl>/predict  (multipart/form-data)
- *
- * Expected server response:
- * {
- *   "prediction": "Real" | "Fake" | "Suspicious",
- *   "confidence": 0.95,
- *   "fake_probability": 0.87,
- *   "video_fake_score": 0.82,
- *   "audio_fake_score": 0.93,
- *   "security_alert": null | "MISMATCH_DETECTED" | "LOW_CONFIDENCE",
- *   "threat_vector": null | "FACE_SWAP_ATTACK" | "VOICE_CLONE_ATTACK",
- *   "analysis_source": "local" | "gemini",
- *   "fusion_mode": "rl_adaptive",
- *   "rl_weights": { "video_weight": 0.9, "audio_weight": 0.1 },
- *   "inference_time_ms": 245.3
- * }
+ * Primary endpoint: POST /predict_batch (sends accumulated frames as batch)
+ * Legacy endpoint:  POST /predict (single frame, kept for backward compat)
  */
 class ApiClient(private val serverUrl: String) {
 
@@ -41,21 +26,20 @@ class ApiClient(private val serverUrl: String) {
         private const val TAG = "ApiClient"
     }
 
-    // Support both TLS 1.2 (Android 8.x) and TLS 1.3 (Android 10+)
     private val tlsSpec = ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
         .tlsVersions(TlsVersion.TLS_1_2, TlsVersion.TLS_1_3)
         .build()
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)   // batch may take longer
+        .writeTimeout(60, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .connectionSpecs(listOf(tlsSpec, ConnectionSpec.CLEARTEXT))
         .addInterceptor { chain ->
             val request = chain.request().newBuilder()
                 .addHeader("ngrok-skip-browser-warning", "true")
-                .addHeader("User-Agent", "DeepFakeDetector/1.0")
+                .addHeader("User-Agent", "DeepFakeDetector/2.0")
                 .build()
             chain.proceed(request)
         }
@@ -70,19 +54,80 @@ class ApiClient(private val serverUrl: String) {
         val fakeProbability: Float,     // combined fake score
         val videoFakeScore: Float?,     // individual video score
         val audioFakeScore: Float?,     // individual audio score
+        val personDetected: Boolean,    // was a person found in the frames?
         val securityAlert: String?,     // null, "MISMATCH_DETECTED", "LOW_CONFIDENCE"
         val threatVector: String?,      // null, "FACE_SWAP_ATTACK", "VOICE_CLONE_ATTACK"
         val analysisSource: String,     // "local" or "gemini"
-        val fusionMode: String?,        // "rl_adaptive", "security_first", etc.
+        val fusionMode: String?,        // "rl_adaptive", etc.
         val videoWeight: Float?,        // RL video weight
         val audioWeight: Float?,        // RL audio weight
-        val inferenceTimeMs: Float      // server-side inference time
+        val inferenceTimeMs: Float,     // server-side inference time
+        val framesAnalyzed: Int = 0     // number of frames in batch
     )
 
     /**
-     * Sends a video frame and/or audio segment to the backend for analysis.
-     * Either parameter can be null if that modality is unavailable.
-     * Returns PredictionResult or null on failure.
+     * Send a BATCH of accumulated frames + optional audio to /predict_batch.
+     * This is the primary prediction method — sends all frames at once for
+     * coherent multi-frame analysis by GenConViT.
+     *
+     * @param frames List of JPEG byte arrays (accumulated during the cycle)
+     * @param audioSegment Optional audio WAV bytes
+     * @return PredictionResult or null on failure
+     */
+    suspend fun sendBatchPrediction(
+        frames: List<ByteArray>,
+        audioSegment: ByteArray?
+    ): PredictionResult? = withContext(Dispatchers.IO) {
+        try {
+            val builder = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+
+            // Add all frames as "video_frames" parts
+            for ((i, frame) in frames.withIndex()) {
+                builder.addFormDataPart(
+                    "video_frames",
+                    "frame_$i.jpg",
+                    frame.toRequestBody("image/jpeg".toMediaType())
+                )
+            }
+
+            // Add audio if present
+            if (audioSegment != null && audioSegment.size > 100) {
+                builder.addFormDataPart(
+                    "audio_segment",
+                    "audio.wav",
+                    audioSegment.toRequestBody("audio/wav".toMediaType())
+                )
+            }
+
+            val url = serverUrl.trimEnd('/') + "/predict_batch"
+            val request = Request.Builder()
+                .url(url)
+                .post(builder.build())
+                .build()
+
+            Log.i(TAG, "Sending batch: ${frames.size} frames + " +
+                    "${if (audioSegment != null) "audio" else "no audio"} to $url")
+
+            val response = client.newCall(request).execute()
+            val body = response.body?.string()
+
+            if (!response.isSuccessful || body == null) {
+                Log.e(TAG, "Server error: ${response.code} - $body")
+                return@withContext null
+            }
+
+            parsePredictionResponse(body)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send batch prediction", e)
+            null
+        }
+    }
+
+    /**
+     * Legacy single-frame prediction (kept for backward compat).
      */
     suspend fun sendForPrediction(
         videoFrame: ByteArray?,
@@ -114,8 +159,6 @@ class ApiClient(private val serverUrl: String) {
                 .post(builder.build())
                 .build()
 
-            Log.d(TAG, "Sending prediction request to $url")
-
             val response = client.newCall(request).execute()
             val body = response.body?.string()
 
@@ -124,36 +167,9 @@ class ApiClient(private val serverUrl: String) {
                 return@withContext null
             }
 
-            val json = JSONObject(body)
-
-            val rlWeights = json.optJSONObject("rl_weights")
-
-            val result = PredictionResult(
-                prediction = json.optString("prediction", "Unknown"),
-                confidence = json.optDouble("confidence", 0.0).toFloat(),
-                fakeProbability = json.optDouble("fake_probability", 0.5).toFloat(),
-                videoFakeScore = if (json.isNull("video_fake_score")) null
-                                 else json.optDouble("video_fake_score").toFloat(),
-                audioFakeScore = if (json.isNull("audio_fake_score")) null
-                                 else json.optDouble("audio_fake_score").toFloat(),
-                securityAlert = json.optString("security_alert", "").ifBlank { null },
-                threatVector = json.optString("threat_vector", "").ifBlank { null },
-                analysisSource = json.optString("analysis_source", "local"),
-                fusionMode = json.optString("fusion_mode", "").ifBlank { null },
-                videoWeight = rlWeights?.optDouble("video_weight")?.toFloat(),
-                audioWeight = rlWeights?.optDouble("audio_weight")?.toFloat(),
-                inferenceTimeMs = json.optDouble("inference_time_ms", 0.0).toFloat()
-            )
-
-            Log.i(TAG, "Prediction: ${result.prediction} " +
-                    "(conf=${result.confidence}, " +
-                    "vid=${result.videoFakeScore}, " +
-                    "aud=${result.audioFakeScore}, " +
-                    "time=${result.inferenceTimeMs}ms)")
-
-            result
+            parsePredictionResponse(body)
         } catch (e: CancellationException) {
-            throw e  // Don't swallow coroutine cancellation
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send prediction request", e)
             null
@@ -161,22 +177,93 @@ class ApiClient(private val serverUrl: String) {
     }
 
     /**
-     * Check if the server is reachable and models are loaded.
-     * Returns true if health check succeeds.
+     * Parse a JSON response into PredictionResult.
+     */
+    private fun parsePredictionResponse(body: String): PredictionResult {
+        val json = JSONObject(body)
+        val rlWeights = json.optJSONObject("rl_weights")
+
+        val result = PredictionResult(
+            prediction = json.optString("prediction", "Unknown"),
+            confidence = json.optDouble("confidence", 0.0).toFloat(),
+            fakeProbability = json.optDouble("fake_probability", 0.5).toFloat(),
+            videoFakeScore = if (json.isNull("video_fake_score")) null
+                             else json.optDouble("video_fake_score").toFloat(),
+            audioFakeScore = if (json.isNull("audio_fake_score")) null
+                             else json.optDouble("audio_fake_score").toFloat(),
+            personDetected = json.optBoolean("person_detected", true),
+            securityAlert = json.optString("security_alert", "").ifBlank { null },
+            threatVector = json.optString("threat_vector", "").ifBlank { null },
+            analysisSource = json.optString("analysis_source", "local"),
+            fusionMode = json.optString("fusion_mode", "").ifBlank { null },
+            videoWeight = rlWeights?.optDouble("video_weight")?.toFloat(),
+            audioWeight = rlWeights?.optDouble("audio_weight")?.toFloat(),
+            inferenceTimeMs = json.optDouble("inference_time_ms", 0.0).toFloat(),
+            framesAnalyzed = json.optInt("frames_analyzed", 0)
+        )
+
+        Log.i(TAG, "Result: ${result.prediction} " +
+                "(conf=${result.confidence}, " +
+                "vid=${result.videoFakeScore}, " +
+                "aud=${result.audioFakeScore}, " +
+                "frames=${result.framesAnalyzed}, " +
+                "time=${result.inferenceTimeMs}ms)")
+
+        return result
+    }
+
+    /**
+     * Check if the server is reachable.
      */
     suspend fun checkHealth(): Boolean = withContext(Dispatchers.IO) {
         try {
             val url = serverUrl.trimEnd('/') + "/health"
             val request = Request.Builder().url(url).get().build()
             val response = client.newCall(request).execute()
-            val body = response.body?.string()
             val ok = response.isSuccessful
-            Log.i(TAG, "Health check: ${if (ok) "OK" else "FAIL (${response.code})"} body=${body?.take(100)}")
+            Log.i(TAG, "Health check: ${if (ok) "OK" else "FAIL (${response.code})"}")
             ok
         } catch (e: CancellationException) {
-            throw e  // Don't swallow coroutine cancellation
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Health check failed", e)
+            false
+        }
+    }
+
+    /**
+     * Lightweight person presence check — sends a single frame to /check_person.
+     * Used for auto-start scanning (no model inference on server).
+     */
+    suspend fun checkPerson(frameJpeg: ByteArray): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val body = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart(
+                    "frame", "scan.jpg",
+                    frameJpeg.toRequestBody("image/jpeg".toMediaType())
+                )
+                .build()
+
+            val url = serverUrl.trimEnd('/') + "/check_person"
+            val request = Request.Builder().url(url).post(body).build()
+            val response = client.newCall(request).execute()
+            val respBody = response.body?.string()
+
+            if (!response.isSuccessful || respBody == null) {
+                Log.w(TAG, "check_person failed: ${response.code}")
+                return@withContext false
+            }
+
+            val json = org.json.JSONObject(respBody)
+            val detected = json.optBoolean("person_detected", false)
+            val type = json.optString("type", "none")
+            Log.i(TAG, "Person check: detected=$detected type=$type")
+            detected
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "checkPerson failed", e)
             false
         }
     }

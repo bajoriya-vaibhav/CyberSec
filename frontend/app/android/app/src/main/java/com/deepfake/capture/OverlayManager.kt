@@ -5,484 +5,260 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.text.InputType
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.view.inputmethod.EditorInfo
-import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 
 /**
- * Floating overlay with two states:
- *   • Collapsed: small draggable bubble icon
- *   • Expanded: panel with cycle-based detection summary, server URL, start/stop controls
+ * Compact floating overlay for DeepGuard.
  *
- * Accumulates per-frame results over 30-second cycles, then displays a structured
- * briefing template with verdict, confidence, frame breakdown, alerts, and cycle history.
+ * Features:
+ *   - Auto toggle: scans for person and auto-starts/stops streaming
+ *   - Audio toggle: enables/disables audio analysis
+ *   - Manual start/stop always available
+ *   - "No person detected" notification
+ *   - Async result display (never blocks streaming)
  */
 class OverlayManager(private val context: Context) {
 
     companion object {
         private const val TAG = "OverlayManager"
         private const val PREFS_NAME = "deepfake_prefs"
-        private const val KEY_SERVER_URL = "server_url"
-        private const val CYCLE_FRAME_COUNT = 5            // Frames per cycle
-        private const val CYCLE_DURATION_MS = 5_000L      // Max cycle duration in ms
-        private const val MAX_HISTORY = 5                 // Keep last N cycle summaries
+        private const val KEY_AUDIO_ENABLED = "audio_enabled"
+        private const val KEY_AUTO_MODE = "auto_mode"
     }
 
     private var windowManager: WindowManager? = null
-
-    // Collapsed bubble
     private var bubbleView: View? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
-
-    // Expanded panel
     private var panelView: View? = null
     private var panelParams: WindowManager.LayoutParams? = null
 
-    // Panel UI references
+    // UI references
     private var statusText: TextView? = null
-    private var progressText: TextView? = null
-    private var progressBar: View? = null
-    private var progressBarTrack: View? = null
+    private var statusDot: View? = null
+    private var streamInfoText: TextView? = null
     private var verdictEmoji: TextView? = null
     private var verdictLabel: TextView? = null
     private var confidenceLabel: TextView? = null
-    private var breakdownCard: LinearLayout? = null
-    private var breakdownText: TextView? = null
-    private var scoresLine: TextView? = null
-    private var alertSection: TextView? = null
-    private var inferenceLabel: TextView? = null
+    private var videoScoreText: TextView? = null
+    private var audioScoreText: TextView? = null
+    private var detailsText: TextView? = null
     private var historyStrip: TextView? = null
-    private var cycleCountLabel: TextView? = null
-    private var serverUrlInput: EditText? = null
     private var startBtn: TextView? = null
     private var stopBtn: TextView? = null
-    private var statusDot: View? = null
-
-    // Sections that should hide/show
+    private var audioToggleBtn: TextView? = null
+    private var autoToggleBtn: TextView? = null
     private var resultSection: LinearLayout? = null
+    private var streamSection: LinearLayout? = null
 
     private var isExpanded = false
     private var isCapturing = false
+    private var isScanning = false
 
+    var isAudioEnabled = false
+        private set
+    var isAutoEnabled = true
+        private set
+
+    // Callbacks
     var onStartCapture: ((serverUrl: String) -> Unit)? = null
     var onStopCapture: (() -> Unit)? = null
     var onCloseOverlay: (() -> Unit)? = null
+    var onAudioToggleChanged: ((enabled: Boolean) -> Unit)? = null
+    var onAutoToggleChanged: ((enabled: Boolean) -> Unit)? = null
 
-    // ─── Cycle Accumulation ────────────────────────────────────
+    // History
+    private data class CycleResult(val verdict: String, val confidence: Float, val num: Int)
+    private var cycleNumber = 0
+    private val history = mutableListOf<CycleResult>()
 
-    data class CycleSummary(
-        val cycleNumber: Int,
-        val verdict: String,           // "Real", "Fake", "Suspicious"
-        val avgConfidence: Float,
-        val realCount: Int,
-        val fakeCount: Int,
-        val suspiciousCount: Int,
-        val totalFrames: Int,
-        val avgVideoScore: Float?,
-        val avgAudioScore: Float?,
-        val alerts: List<String>,
-        val avgInferenceMs: Float,
-        val timestamp: Long
-    )
-
-    private val frameResults = mutableListOf<ApiClient.PredictionResult>()
-    private var cycleStartTime = 0L
-    private var currentCycleNumber = 0
-    private val cycleHistory = mutableListOf<CycleSummary>()
-    private var latestSummary: CycleSummary? = null
-
-    // ─── dp/sp helper ──────────────────────────────────────────
     private fun dp(v: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), context.resources.displayMetrics).toInt()
-
-    private fun sp(v: Float): Float =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, v, context.resources.displayMetrics)
 
     // ─── Public API ────────────────────────────────────────────
 
     fun show() {
         if (bubbleView != null) return
-
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        isAudioEnabled = prefs.getBoolean(KEY_AUDIO_ENABLED, false)
+        isAutoEnabled = prefs.getBoolean(KEY_AUTO_MODE, true)
         windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         showBubble()
-        Log.i(TAG, "Overlay shown (bubble)")
     }
 
     fun hide() {
-        removeBubble()
-        removePanel()
-        windowManager = null
-        Log.i(TAG, "Overlay hidden")
+        removeBubble(); removePanel(); windowManager = null
     }
 
     fun updateStatus(status: String) {
         panelView?.post {
             statusText?.text = status
-            statusDot?.background = makeDot(Color.parseColor("#4FC3F7"))
+        }
+    }
+
+    fun setScanningState(scanning: Boolean) {
+        isScanning = scanning
+        panelView?.post {
+            if (scanning) {
+                streamSection?.visibility = View.VISIBLE
+                streamInfoText?.text = "👁 Scanning for person…"
+                statusDot?.background = makeDot(Color.parseColor("#FFA726"))
+                // Show pulsing dot effect
+                statusDot?.animate()?.alpha(0.3f)?.setDuration(600)?.withEndAction {
+                    statusDot?.animate()?.alpha(1f)?.setDuration(600)?.start()
+                }?.start()
+            } else {
+                statusDot?.animate()?.cancel()
+                statusDot?.alpha = 1f
+            }
+            // Allow manual start during scanning
+            startBtn?.apply { isEnabled = true; alpha = 1f }
+            stopBtn?.apply { isEnabled = false; alpha = 0.4f }
+        }
+    }
+
+    fun updateStreamingProgress(framesBuffered: Int, secondsUntilAnalysis: Int, totalFramesSent: Int) {
+        panelView?.post {
+            streamSection?.visibility = View.VISIBLE
+            val secText = if (secondsUntilAnalysis > 0) "analyzing in ${secondsUntilAnalysis}s" else "analyzing…"
+            streamInfoText?.text = "$framesBuffered buffered • $totalFramesSent sent • $secText"
+        }
+    }
+
+    fun showNoPersonNotification() {
+        panelView?.post {
+            resultSection?.visibility = View.GONE
+            streamSection?.visibility = View.VISIBLE
+            streamInfoText?.text = "⚠ No person detected — pausing"
+            statusText?.text = "⚠ No person"
+            statusText?.setTextColor(Color.parseColor("#FFA726"))
+            statusDot?.background = makeDot(Color.parseColor("#FFA726"))
         }
         bubbleView?.post {
-            (bubbleView as? TextView)?.setTextColor(Color.parseColor("#4FC3F7"))
+            (bubbleView as? TextView)?.apply {
+                text = "⚠️"
+                setTextColor(Color.parseColor("#FFA726"))
+            }
         }
     }
 
-    /**
-     * Accumulate a single per-frame result into the current cycle.
-     * After CYCLE_FRAME_COUNT frames or CYCLE_DURATION_MS ms, finalize
-     * the cycle and display the briefing template.
-     */
-    fun accumulateResult(result: ApiClient.PredictionResult) {
-        if (cycleStartTime == 0L) {
-            cycleStartTime = System.currentTimeMillis()
+    fun showBatchResult(result: ApiClient.PredictionResult) {
+        cycleNumber++
+        val verdict = result.prediction
+        val confidence = result.confidence
+        val isReal = verdict.equals("Real", true)
+        val isFake = verdict.equals("Fake", true)
+
+        val color = when {
+            isReal -> Color.parseColor("#66BB6A")
+            isFake -> Color.parseColor("#EF5350")
+            else -> Color.parseColor("#FFA726")
+        }
+        val emoji = when {
+            isReal -> "✅"; isFake -> "🚨"; else -> "⚠️"
         }
 
-        frameResults.add(result)
-
-        val elapsed = System.currentTimeMillis() - cycleStartTime
-        val frameCount = frameResults.size
-
-        // Update live progress
         panelView?.post {
-            progressText?.visibility = View.VISIBLE
-            progressBarTrack?.visibility = View.VISIBLE
-            updateProgressUI(frameCount, CYCLE_FRAME_COUNT)
-            statusText?.text = "Analyzing…"
-            statusDot?.background = makeDot(Color.parseColor("#4FC3F7"))
+            resultSection?.visibility = View.VISIBLE
+
+            verdictEmoji?.text = emoji
+            verdictLabel?.text = verdict.uppercase()
+            verdictLabel?.setTextColor(color)
+            confidenceLabel?.text = "${"%.1f".format(confidence * 100)}%"
+            confidenceLabel?.setTextColor(color)
+
+            result.videoFakeScore?.let {
+                videoScoreText?.text = "Video: ${"%.0f".format(it * 100)}%"
+                videoScoreText?.setTextColor(if (it > 0.5) Color.parseColor("#EF5350") else Color.parseColor("#66BB6A"))
+                videoScoreText?.visibility = View.VISIBLE
+            } ?: run { videoScoreText?.visibility = View.GONE }
+
+            if (isAudioEnabled) {
+                result.audioFakeScore?.let {
+                    audioScoreText?.text = "Audio: ${"%.0f".format(it * 100)}%"
+                    audioScoreText?.setTextColor(if (it > 0.5) Color.parseColor("#EF5350") else Color.parseColor("#66BB6A"))
+                } ?: run { audioScoreText?.text = "Audio: N/A" }
+                audioScoreText?.visibility = View.VISIBLE
+            } else {
+                audioScoreText?.text = "Audio: Off"
+                audioScoreText?.setTextColor(Color.parseColor("#50FFFFFF"))
+                audioScoreText?.visibility = View.VISIBLE
+            }
+
+            detailsText?.text = "${result.framesAnalyzed} frames  •  ${"%.0f".format(result.inferenceTimeMs)}ms"
+
+            panelView?.background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE; cornerRadius = dp(16).toFloat()
+                setColor(Color.parseColor(if (isReal) "#F0121620" else if (isFake) "#F0181215" else "#F0141820"))
+                setStroke(dp(1), Color.parseColor(if (isReal) "#3066BB6A" else if (isFake) "#30EF5350" else "#30FFA726"))
+            }
+            statusDot?.background = makeDot(color)
+            statusText?.text = when {
+                isReal -> "📡 ✓ Authentic"
+                isFake -> "📡 ✕ Deepfake"
+                else -> "📡 ⚠ Suspicious"
+            }
+            statusText?.setTextColor(color)
+            updateHistory(verdict, confidence)
         }
-
-        // Check if cycle is complete
-        if (frameCount >= CYCLE_FRAME_COUNT || elapsed >= CYCLE_DURATION_MS) {
-            finalizeCycle()
+        bubbleView?.post {
+            (bubbleView as? TextView)?.apply { text = emoji; setTextColor(color) }
         }
-    }
-
-    /**
-     * Legacy method — calls accumulateResult internally.
-     */
-    fun updateResult(result: ApiClient.PredictionResult) {
-        accumulateResult(result)
-    }
-
-    /**
-     * Legacy method for backward compat.
-     */
-    fun updateResult(prediction: String, confidence: Float) {
-        val result = ApiClient.PredictionResult(
-            prediction = prediction,
-            confidence = confidence,
-            fakeProbability = if (prediction.equals("Fake", ignoreCase = true)) confidence else 1f - confidence,
-            videoFakeScore = null,
-            audioFakeScore = null,
-            securityAlert = null,
-            threatVector = null,
-            analysisSource = "local",
-            fusionMode = null,
-            videoWeight = null,
-            audioWeight = null,
-            inferenceTimeMs = 0f
-        )
-        accumulateResult(result)
     }
 
     fun setCapturingState(capturing: Boolean) {
         isCapturing = capturing
+        isScanning = false
         panelView?.post {
-            startBtn?.apply {
-                isEnabled = !capturing
-                alpha = if (capturing) 0.4f else 1.0f
-            }
-            stopBtn?.apply {
-                isEnabled = capturing
-                alpha = if (capturing) 1.0f else 0.4f
-            }
-            serverUrlInput?.isEnabled = !capturing
+            startBtn?.apply { isEnabled = !capturing; alpha = if (capturing) 0.4f else 1f }
+            stopBtn?.apply { isEnabled = capturing; alpha = if (capturing) 1f else 0.4f }
         }
-
         if (capturing) {
-            // Reset accumulator for new session
-            resetAccumulator()
+            cycleNumber = 0; history.clear()
             panelView?.post {
-                progressText?.visibility = View.VISIBLE
-                progressBarTrack?.visibility = View.VISIBLE
-                updateProgressUI(0, CYCLE_FRAME_COUNT)
-                showResultSection(false)
+                resultSection?.visibility = View.GONE
+                streamSection?.visibility = View.VISIBLE
                 historyStrip?.visibility = View.GONE
+                streamInfoText?.text = "Connecting…"
+                statusDot?.background = makeDot(Color.parseColor("#4FC3F7"))
             }
         } else {
             panelView?.post {
-                progressText?.visibility = View.GONE
-                progressBarTrack?.visibility = View.GONE
+                if (!isScanning) streamSection?.visibility = View.GONE
             }
         }
     }
 
-    // ─── Cycle Logic ───────────────────────────────────────────
+    // Legacy compat
+    fun accumulateResult(r: ApiClient.PredictionResult) = showBatchResult(r)
+    fun updateResult(r: ApiClient.PredictionResult) = showBatchResult(r)
+    fun updateProgress(e: Int, t: Int, f: Int) {}
+    fun updateCycleDuration(s: Int) {}
 
-    private fun resetAccumulator() {
-        frameResults.clear()
-        cycleStartTime = 0L
-        currentCycleNumber = 0
-        cycleHistory.clear()
-        latestSummary = null
-    }
-
-    private fun finalizeCycle() {
-        if (frameResults.isEmpty()) return
-
-        currentCycleNumber++
-
-        // Count verdicts
-        var realCount = 0
-        var fakeCount = 0
-        var suspiciousCount = 0
-        var totalConfidence = 0f
-        var totalVideoScore = 0f
-        var videoScoreCount = 0
-        var totalAudioScore = 0f
-        var audioScoreCount = 0
-        var totalInferenceMs = 0f
-        val uniqueAlerts = mutableSetOf<String>()
-
-        for (r in frameResults) {
-            totalConfidence += r.confidence
-            totalInferenceMs += r.inferenceTimeMs
-
-            when {
-                r.prediction.equals("Real", ignoreCase = true) -> realCount++
-                r.prediction.equals("Suspicious", ignoreCase = true) -> suspiciousCount++
-                else -> fakeCount++
-            }
-
-            r.videoFakeScore?.let {
-                totalVideoScore += it
-                videoScoreCount++
-            }
-            r.audioFakeScore?.let {
-                totalAudioScore += it
-                audioScoreCount++
-            }
-            r.securityAlert?.let { uniqueAlerts.add(it) }
-            r.threatVector?.let { uniqueAlerts.add(it) }
-        }
-
-        val totalFrames = frameResults.size
-
-        // Majority vote for verdict
-        val verdict = when {
-            fakeCount >= realCount && fakeCount >= suspiciousCount -> "Fake"
-            suspiciousCount > realCount -> "Suspicious"
-            else -> "Real"
-        }
-
-        val summary = CycleSummary(
-            cycleNumber = currentCycleNumber,
-            verdict = verdict,
-            avgConfidence = totalConfidence / totalFrames,
-            realCount = realCount,
-            fakeCount = fakeCount,
-            suspiciousCount = suspiciousCount,
-            totalFrames = totalFrames,
-            avgVideoScore = if (videoScoreCount > 0) totalVideoScore / videoScoreCount else null,
-            avgAudioScore = if (audioScoreCount > 0) totalAudioScore / audioScoreCount else null,
-            alerts = uniqueAlerts.toList(),
-            avgInferenceMs = totalInferenceMs / totalFrames,
-            timestamp = System.currentTimeMillis()
-        )
-
-        latestSummary = summary
-        cycleHistory.add(summary)
-        if (cycleHistory.size > MAX_HISTORY) {
-            cycleHistory.removeAt(0)
-        }
-
-        // Reset for next cycle
-        frameResults.clear()
-        cycleStartTime = System.currentTimeMillis()
-
-        // Update UI
-        panelView?.post {
-            showCycleBriefing(summary)
-        }
-
-        // Update bubble
-        val emoji = when (verdict) {
-            "Real" -> "✅"
-            "Suspicious" -> "⚠️"
-            else -> "🚨"
-        }
-        val color = when (verdict) {
-            "Real" -> Color.parseColor("#66BB6A")
-            "Suspicious" -> Color.parseColor("#FFA726")
-            else -> Color.parseColor("#EF5350")
-        }
-        bubbleView?.post {
-            (bubbleView as? TextView)?.apply {
-                text = emoji
-                setTextColor(color)
-            }
-        }
-
-        Log.i(TAG, "Cycle #$currentCycleNumber finalized: $verdict " +
-                "(R=$realCount F=$fakeCount S=$suspiciousCount, " +
-                "conf=${"%.1f".format(summary.avgConfidence * 100)}%)")
-    }
-
-    // ─── UI Updates ────────────────────────────────────────────
-
-    private fun updateProgressUI(current: Int, total: Int) {
-        progressText?.text = "Analyzing: $current / $total frames"
-
-        // Update progress bar width
-        progressBar?.let { bar ->
-            progressBarTrack?.let { track ->
-                track.post {
-                    val trackWidth = track.width
-                    if (trackWidth > 0) {
-                        val fillWidth = (trackWidth * current.coerceAtMost(total)) / total
-                        val params = bar.layoutParams
-                        params.width = fillWidth.coerceAtLeast(0)
-                        bar.layoutParams = params
-                    }
-                }
-            }
-        }
-    }
-
-    private fun showResultSection(visible: Boolean) {
-        resultSection?.visibility = if (visible) View.VISIBLE else View.GONE
-    }
-
-    private fun showCycleBriefing(summary: CycleSummary) {
-        showResultSection(true)
-
-        val isReal = summary.verdict == "Real"
-        val isSuspicious = summary.verdict == "Suspicious"
-
-        val color = when {
-            isReal -> Color.parseColor("#66BB6A")
-            isSuspicious -> Color.parseColor("#FFA726")
-            else -> Color.parseColor("#EF5350")
-        }
-
-        val emoji = when {
-            isReal -> "✅"
-            isSuspicious -> "⚠️"
-            else -> "🚨"
-        }
-
-        // Cycle label
-        cycleCountLabel?.text = "CYCLE RESULT — #${summary.cycleNumber}"
-        cycleCountLabel?.setTextColor(Color.parseColor("#80FFFFFF"))
-
-        // Verdict
-        verdictEmoji?.text = emoji
-        verdictLabel?.text = "${summary.verdict.uppercase()}"
-        verdictLabel?.setTextColor(color)
-
-        // Confidence
-        confidenceLabel?.text = "${"%.1f".format(summary.avgConfidence * 100)}% confidence"
-        confidenceLabel?.setTextColor(color)
-
-        // Frame breakdown
-        breakdownText?.text = "Real: ${summary.realCount}   Fake: ${summary.fakeCount}   Suspicious: ${summary.suspiciousCount}"
-
-        // Scores line
-        val scoreParts = mutableListOf<String>()
-        summary.avgVideoScore?.let { scoreParts.add("Avg Vid: ${"%.0f".format(it * 100)}%") }
-        summary.avgAudioScore?.let { scoreParts.add("Avg Aud: ${"%.0f".format(it * 100)}%") }
-        scoresLine?.text = if (scoreParts.isNotEmpty()) scoreParts.joinToString("   ") else "Scores: N/A"
-
-        // Alerts
-        if (summary.alerts.isEmpty()) {
-            alertSection?.text = "✓ No alerts detected"
-            alertSection?.setTextColor(Color.parseColor("#66BB6A"))
-        } else {
-            val alertStr = summary.alerts.joinToString("\n") { alert ->
-                when (alert) {
-                    "FACE_SWAP_ATTACK" -> "⚠ Face swap detected"
-                    "VOICE_CLONE_ATTACK" -> "⚠ Voice clone detected"
-                    "MISMATCH_DETECTED" -> "⚠ Audio/video mismatch"
-                    "LOW_CONFIDENCE" -> "⚠ Low confidence"
-                    else -> "⚠ $alert"
-                }
-            }
-            alertSection?.text = alertStr
-            alertSection?.setTextColor(Color.parseColor("#FFA726"))
-        }
-
-        // Inference time
-        inferenceLabel?.text = "${"%.0f".format(summary.avgInferenceMs)}ms avg inference"
-
-        // Subtle panel background tint — keep opaque base with colored overlay
-        panelView?.background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(16).toFloat()
-            setColor(Color.parseColor(
-                when {
-                    isReal -> "#F0121620"
-                    isSuspicious -> "#F0141820"
-                    else -> "#F0181215"
-                }
-            ))
-            setStroke(dp(1), Color.parseColor(
-                when {
-                    isReal -> "#2066BB6A"
-                    isSuspicious -> "#20FFA726"
-                    else -> "#20EF5350"
-                }
-            ))
-        }
-
-        statusDot?.background = makeDot(color)
-        statusText?.text = when {
-            isReal -> "Real Detected"
-            isSuspicious -> "Suspicious!"
-            else -> "Fake Detected"
-        }
-        statusText?.setTextColor(color)
-
-        // History strip
-        updateHistoryStrip()
-
-        // Reset progress for next cycle
-        updateProgressUI(0, CYCLE_FRAME_COUNT)
-    }
-
-    private fun updateHistoryStrip() {
-        if (cycleHistory.size <= 1) {
-            historyStrip?.visibility = View.GONE
-            return
-        }
-
+    // History
+    private fun updateHistory(verdict: String, confidence: Float) {
+        history.add(CycleResult(verdict, confidence, cycleNumber))
+        if (history.size > 5) history.removeAt(0)
+        if (history.size <= 1) { historyStrip?.visibility = View.GONE; return }
         historyStrip?.visibility = View.VISIBLE
-        // Show all but the latest (which is the current one displayed)
-        val pastCycles = cycleHistory.dropLast(1).takeLast(4)
-        val historyStr = pastCycles.joinToString("   ") { cycle ->
-            val e = when (cycle.verdict) {
-                "Real" -> "✅"
-                "Suspicious" -> "⚠️"
-                else -> "🚨"
-            }
-            "#${cycle.cycleNumber} $e ${cycle.verdict}"
+        val str = history.dropLast(1).joinToString("  ") {
+            val e = when (it.verdict) { "Real" -> "✅"; "Suspicious" -> "⚠️"; else -> "🚨" }
+            "#${it.num}$e"
         }
-        historyStrip?.text = "Past: $historyStr"
+        historyStrip?.text = "History: $str"
     }
 
-    // ─── Collapsed Bubble ──────────────────────────────────────
+    // ─── Bubble ────────────────────────────────────────────────
 
     private fun showBubble() {
         val bubble = TextView(context).apply {
-            text = "🛡️"
-            textSize = 22f
-            gravity = Gravity.CENTER
+            text = "🛡️"; textSize = 22f; gravity = Gravity.CENTER
             setPadding(dp(6), dp(6), dp(6), dp(6))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
@@ -491,82 +267,47 @@ class OverlayManager(private val context: Context) {
             }
             elevation = dp(10).toFloat()
         }
-
         bubbleParams = WindowManager.LayoutParams(
             dp(52), dp(52),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = dp(8)
-            y = dp(120)
-        }
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = dp(8); y = dp(120) }
 
-        // Drag + tap detection
-        var startX = 0
-        var startY = 0
-        var startTouchX = 0f
-        var startTouchY = 0f
-        var moved = false
-
-        bubble.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    startX = bubbleParams!!.x
-                    startY = bubbleParams!!.y
-                    startTouchX = event.rawX
-                    startTouchY = event.rawY
-                    moved = false
-                    true
-                }
+        var sx = 0; var sy = 0; var tx = 0f; var ty = 0f; var moved = false
+        bubble.setOnTouchListener { _, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> { sx = bubbleParams!!.x; sy = bubbleParams!!.y; tx = e.rawX; ty = e.rawY; moved = false; true }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - startTouchX).toInt()
-                    val dy = (event.rawY - startTouchY).toInt()
+                    val dx = (e.rawX - tx).toInt(); val dy = (e.rawY - ty).toInt()
                     if (Math.abs(dx) > dp(5) || Math.abs(dy) > dp(5)) moved = true
-                    bubbleParams!!.x = startX + dx
-                    bubbleParams!!.y = startY + dy
-                    windowManager?.updateViewLayout(bubble, bubbleParams)
-                    true
+                    bubbleParams!!.x = sx + dx; bubbleParams!!.y = sy + dy
+                    windowManager?.updateViewLayout(bubble, bubbleParams); true
                 }
-                MotionEvent.ACTION_UP -> {
-                    if (!moved) toggleExpand()
-                    true
-                }
+                MotionEvent.ACTION_UP -> { if (!moved) toggleExpand(); true }
                 else -> false
             }
         }
-
         bubbleView = bubble
         windowManager?.addView(bubble, bubbleParams)
     }
 
     private fun removeBubble() {
-        bubbleView?.let {
-            try { windowManager?.removeView(it) } catch (_: Exception) {}
-        }
+        bubbleView?.let { try { windowManager?.removeView(it) } catch (_: Exception) {} }
         bubbleView = null
     }
 
-    // ─── Expanded Panel ────────────────────────────────────────
+    // ─── Panel ─────────────────────────────────────────────────
 
     private fun toggleExpand() {
-        if (isExpanded) {
-            removePanel()
-            isExpanded = false
-        } else {
-            showPanel()
-            isExpanded = true
-        }
+        if (isExpanded) { removePanel(); isExpanded = false }
+        else { showPanel(); isExpanded = true }
     }
 
     private fun showPanel() {
-        val panel = buildPanelLayout()
-
+        val panel = buildPanel()
         panelParams = WindowManager.LayoutParams(
-            dp(310),
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(270), WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
@@ -574,435 +315,254 @@ class OverlayManager(private val context: Context) {
             gravity = Gravity.TOP or Gravity.START
             x = (bubbleParams?.x ?: dp(8)) + dp(56)
             y = bubbleParams?.y ?: dp(120)
-            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
         }
-
         panelView = panel
         windowManager?.addView(panel, panelParams)
-
-        // Refresh button state
         setCapturingState(isCapturing)
-
-        // If we have a previous summary, show it
-        latestSummary?.let { showCycleBriefing(it) }
-        if (isCapturing) {
-            updateProgressUI(frameResults.size, CYCLE_FRAME_COUNT)
-        }
+        if (isScanning) setScanningState(true)
     }
 
     private fun removePanel() {
-        panelView?.let {
-            try { windowManager?.removeView(it) } catch (_: Exception) {}
-        }
-        panelView = null
-        statusText = null
-        progressText = null
-        progressBar = null
-        progressBarTrack = null
-        verdictEmoji = null
-        verdictLabel = null
-        confidenceLabel = null
-        breakdownCard = null
-        breakdownText = null
-        scoresLine = null
-        alertSection = null
-        inferenceLabel = null
-        historyStrip = null
-        cycleCountLabel = null
-        resultSection = null
-        serverUrlInput = null
-        startBtn = null
-        stopBtn = null
-        statusDot = null
+        panelView?.let { try { windowManager?.removeView(it) } catch (_: Exception) {} }
+        panelView = null; statusText = null; statusDot = null; streamInfoText = null
+        verdictEmoji = null; verdictLabel = null; confidenceLabel = null
+        videoScoreText = null; audioScoreText = null; detailsText = null
+        historyStrip = null; startBtn = null; stopBtn = null
+        audioToggleBtn = null; autoToggleBtn = null
+        resultSection = null; streamSection = null
     }
 
-    private fun buildPanelLayout(): LinearLayout {
+    // ─── Build Panel ───────────────────────────────────────────
+
+    private fun buildPanel(): LinearLayout {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val savedUrl = prefs.getString(KEY_SERVER_URL, "http://10.0.2.2:7860") ?: ""
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(16), dp(18), dp(16))
+            setPadding(dp(14), dp(12), dp(14), dp(12))
             background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(16).toFloat()
+                shape = GradientDrawable.RECTANGLE; cornerRadius = dp(16).toFloat()
                 setColor(Color.parseColor("#F0121218"))
                 setStroke(dp(1), Color.parseColor("#25FFFFFF"))
             }
             elevation = dp(16).toFloat()
         }
 
-        // ── Header row: title + minimize + close
+        // Header
         val header = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(2))
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
         }
-
-        val title = TextView(context).apply {
-            text = "🛡️ DeepFake Detector"
-            setTextColor(Color.parseColor("#F0F0F0"))
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
+        header.addView(TextView(context).apply {
+            text = "🛡️ DeepGuard"; setTextColor(Color.parseColor("#F0F0F0"))
+            textSize = 13f; typeface = Typeface.DEFAULT_BOLD
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        header.addView(title)
-
-        val minimizeBtn = TextView(context).apply {
-            text = "–"
-            setTextColor(Color.parseColor("#99FFFFFF"))
-            textSize = 18f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            val btnBg = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(6).toFloat()
-                setColor(Color.parseColor("#18FFFFFF"))
-            }
-            background = btnBg
-            setPadding(dp(10), dp(2), dp(10), dp(2))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = dp(6) }
-            setOnClickListener { toggleExpand() }
-        }
-        header.addView(minimizeBtn)
-
-        val closeBtn = TextView(context).apply {
-            text = "✕"
-            setTextColor(Color.parseColor("#99FFFFFF"))
-            textSize = 15f
-            gravity = Gravity.CENTER
-            val btnBg = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(6).toFloat()
-                setColor(Color.parseColor("#18FFFFFF"))
-            }
-            background = btnBg
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-            setOnClickListener { onCloseOverlay?.invoke() }
-        }
-        header.addView(closeBtn)
+        })
+        header.addView(makeHeaderBtn("–") { toggleExpand() })
+        header.addView(makeHeaderBtn("✕") { onCloseOverlay?.invoke() })
         root.addView(header)
-
-        // ── Divider
         root.addView(makeDivider())
 
-        // ── Status row
+        // Status row
         val statusRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(8), 0, dp(4))
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(3))
         }
-
         statusDot = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply {
-                marginEnd = dp(8)
-            }
+            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply { marginEnd = dp(6) }
             background = makeDot(Color.parseColor("#78909C"))
         }
         statusRow.addView(statusDot)
-
         statusText = TextView(context).apply {
-            text = if (isCapturing) "Capturing…" else "Idle"
-            setTextColor(Color.parseColor("#CFD8DC"))
-            textSize = 12f
+            text = if (isCapturing) "Streaming…" else if (isScanning) "Scanning…" else "Ready"
+            setTextColor(Color.parseColor("#CFD8DC")); textSize = 11f
         }
         statusRow.addView(statusText)
         root.addView(statusRow)
 
-        // ── Progress section (frame count + bar)
-        progressText = TextView(context).apply {
-            text = "Analyzing: 0 / $CYCLE_FRAME_COUNT frames"
-            setTextColor(Color.parseColor("#80FFFFFF"))
-            textSize = 11f
-            setPadding(0, dp(6), 0, dp(4))
-            visibility = if (isCapturing) View.VISIBLE else View.GONE
+        // Streaming / scanning info
+        streamSection = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (isCapturing || isScanning) View.VISIBLE else View.GONE
         }
-        root.addView(progressText)
-
-        // Progress bar track
-        progressBarTrack = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(3)
-            ).apply {
-                bottomMargin = dp(8)
-            }
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(3).toFloat()
-                setColor(Color.parseColor("#1AFFFFFF"))
-            }
-            visibility = if (isCapturing) View.VISIBLE else View.GONE
+        streamInfoText = TextView(context).apply {
+            text = if (isScanning) "👁 Scanning for person…" else "Waiting…"
+            setTextColor(Color.parseColor("#60FFFFFF")); textSize = 10f
+            setPadding(0, dp(2), 0, dp(4))
         }
+        streamSection!!.addView(streamInfoText)
+        root.addView(streamSection)
 
-        progressBar = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(3))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(3).toFloat()
-                setColor(Color.parseColor("#4FC3F7"))
-            }
-        }
-        (progressBarTrack as LinearLayout).addView(progressBar)
-        root.addView(progressBarTrack)
-
-        // ── Result section (hidden until first cycle completes)
+        // Result section
         resultSection = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
+            orientation = LinearLayout.VERTICAL; visibility = View.GONE
         }
-
-        // Cycle label
-        cycleCountLabel = TextView(context).apply {
-            text = "CYCLE RESULT"
-            setTextColor(Color.parseColor("#80FFFFFF"))
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, dp(4), 0, dp(4))
-            setLetterSpacing(0.1f)
-        }
-        resultSection!!.addView(cycleCountLabel)
-
-        // Verdict row (emoji + label)
         val verdictRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(2), 0, 0)
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
         }
-
-        verdictEmoji = TextView(context).apply {
-            text = ""
-            textSize = 28f
-            setPadding(0, 0, dp(10), 0)
-        }
+        verdictEmoji = TextView(context).apply { textSize = 28f; setPadding(0, 0, dp(10), 0) }
         verdictRow.addView(verdictEmoji)
-
-        val verdictCol = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-
+        val verdictCol = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         verdictLabel = TextView(context).apply {
-            text = ""
-            setTextColor(Color.WHITE)
-            textSize = 22f
-            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE); textSize = 18f; typeface = Typeface.DEFAULT_BOLD
         }
         verdictCol.addView(verdictLabel)
-
         confidenceLabel = TextView(context).apply {
-            text = ""
-            setTextColor(Color.parseColor("#B0FFFFFF"))
-            textSize = 13f
+            setTextColor(Color.parseColor("#B0FFFFFF")); textSize = 12f
         }
         verdictCol.addView(confidenceLabel)
-
         verdictRow.addView(verdictCol)
         resultSection!!.addView(verdictRow)
 
-        // Frame breakdown card
-        breakdownCard = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor("#1AFFFFFF"))
-                setStroke(1, Color.parseColor("#10FFFFFF"))
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = dp(10)
-                bottomMargin = dp(6)
-            }
-        }
-
-        val breakdownLabel = TextView(context).apply {
-            text = "Frame Breakdown"
-            setTextColor(Color.parseColor("#60FFFFFF"))
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, dp(4))
-            setLetterSpacing(0.08f)
-        }
-        breakdownCard!!.addView(breakdownLabel)
-
-        breakdownText = TextView(context).apply {
-            text = ""
-            setTextColor(Color.parseColor("#E0FFFFFF"))
-            textSize = 12f
-        }
-        breakdownCard!!.addView(breakdownText)
-
-        scoresLine = TextView(context).apply {
-            text = ""
-            setTextColor(Color.parseColor("#80FFFFFF"))
-            textSize = 11f
-            setPadding(0, dp(3), 0, 0)
-        }
-        breakdownCard!!.addView(scoresLine)
-
-        resultSection!!.addView(breakdownCard)
-
-        // Alert section
-        alertSection = TextView(context).apply {
-            text = ""
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
+        val scoreRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
             setPadding(0, dp(4), 0, dp(2))
         }
-        resultSection!!.addView(alertSection)
+        videoScoreText = makeScoreChip("Video: —"); scoreRow.addView(videoScoreText)
+        audioScoreText = makeScoreChip("Audio: Off"); scoreRow.addView(audioScoreText)
+        resultSection!!.addView(scoreRow)
 
-        // Inference time
-        inferenceLabel = TextView(context).apply {
-            text = ""
-            setTextColor(Color.parseColor("#60FFFFFF"))
-            textSize = 10f
-            setPadding(0, dp(2), 0, dp(4))
+        detailsText = TextView(context).apply {
+            setTextColor(Color.parseColor("#40FFFFFF")); textSize = 9f
+            setPadding(0, dp(2), 0, dp(2))
         }
-        resultSection!!.addView(inferenceLabel)
-
+        resultSection!!.addView(detailsText)
         root.addView(resultSection)
 
-        // ── History strip divider + text
-        root.addView(makeDivider())
-
         historyStrip = TextView(context).apply {
-            text = ""
-            setTextColor(Color.parseColor("#60FFFFFF"))
-            textSize = 10f
-            setPadding(0, dp(4), 0, dp(2))
-            visibility = View.GONE
+            setTextColor(Color.parseColor("#40FFFFFF")); textSize = 9f
+            setPadding(0, dp(2), 0, dp(2)); visibility = View.GONE
         }
         root.addView(historyStrip)
-
-        // ── Divider before server
         root.addView(makeDivider())
 
-        // ── Server URL
-        val urlLabel = TextView(context).apply {
-            text = "Server URL"
-            setTextColor(Color.parseColor("#60FFFFFF"))
-            textSize = 11f
-            setPadding(0, dp(6), 0, dp(2))
-        }
-        root.addView(urlLabel)
-
-        serverUrlInput = EditText(context).apply {
-            setText(savedUrl)
-            setTextColor(Color.parseColor("#E8E8E8"))
-            textSize = 12f
-            setHintTextColor(Color.parseColor("#40FFFFFF"))
-            hint = "http://10.0.2.2:7860"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            imeOptions = EditorInfo.IME_ACTION_DONE
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(8).toFloat()
-                setColor(Color.parseColor("#12FFFFFF"))
-                setStroke(1, Color.parseColor("#18FFFFFF"))
-            }
-            isSingleLine = true
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-        root.addView(serverUrlInput)
-
-        // ── Buttons row
-        val btnRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(10), 0, 0)
-            gravity = Gravity.CENTER
+        // ── Toggles row: Auto + Audio ──
+        val togglesRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
         }
 
-        startBtn = TextView(context).apply {
-            text = "▶  Start"
-            setTextColor(Color.WHITE)
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(dp(16), dp(11), dp(16), dp(11))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor("#2E7D32"))
-            }
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(6)
-            }
+        // Auto toggle
+        togglesRow.addView(TextView(context).apply {
+            text = "🤖"; textSize = 12f; setPadding(0, 0, dp(4), 0)
+        })
+        autoToggleBtn = TextView(context).apply {
+            text = if (isAutoEnabled) "AUTO" else "MANUAL"
+            setTextColor(if (isAutoEnabled) Color.parseColor("#4FC3F7") else Color.parseColor("#78909C"))
+            textSize = 9f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            background = makeToggleBg(isAutoEnabled, "#4FC3F7")
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) }
             setOnClickListener {
-                val url = serverUrlInput?.text?.toString()?.trim() ?: ""
-                if (url.isNotBlank()) {
-                    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                        .edit().putString(KEY_SERVER_URL, url).apply()
-                    onStartCapture?.invoke(url)
-                }
+                isAutoEnabled = !isAutoEnabled
+                prefs.edit().putBoolean(KEY_AUTO_MODE, isAutoEnabled).apply()
+                text = if (isAutoEnabled) "AUTO" else "MANUAL"
+                setTextColor(if (isAutoEnabled) Color.parseColor("#4FC3F7") else Color.parseColor("#78909C"))
+                background = makeToggleBg(isAutoEnabled, "#4FC3F7")
+                onAutoToggleChanged?.invoke(isAutoEnabled)
             }
         }
+        togglesRow.addView(autoToggleBtn)
+
+        // Audio toggle
+        togglesRow.addView(TextView(context).apply {
+            text = "🎙"; textSize = 12f; setPadding(0, 0, dp(4), 0)
+        })
+        audioToggleBtn = TextView(context).apply {
+            text = if (isAudioEnabled) "ON" else "OFF"
+            setTextColor(if (isAudioEnabled) Color.parseColor("#66BB6A") else Color.parseColor("#78909C"))
+            textSize = 9f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            background = makeToggleBg(isAudioEnabled, "#66BB6A")
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener {
+                isAudioEnabled = !isAudioEnabled
+                prefs.edit().putBoolean(KEY_AUDIO_ENABLED, isAudioEnabled).apply()
+                text = if (isAudioEnabled) "ON" else "OFF"
+                setTextColor(if (isAudioEnabled) Color.parseColor("#66BB6A") else Color.parseColor("#78909C"))
+                background = makeToggleBg(isAudioEnabled, "#66BB6A")
+                onAudioToggleChanged?.invoke(isAudioEnabled)
+            }
+        }
+        togglesRow.addView(audioToggleBtn)
+        root.addView(togglesRow)
+        root.addView(makeDivider())
+
+        // Buttons
+        val btnRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(6), 0, 0); gravity = Gravity.CENTER
+        }
+        startBtn = makeActionBtn("▶ Start", "#2E7D32") {
+            val url = prefs.getString("server_url", "") ?: ""
+            if (url.isNotBlank()) onStartCapture?.invoke(url)
+            else updateStatus("⚠ Set URL in app")
+        }
+        startBtn!!.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) }
         btnRow.addView(startBtn)
 
-        stopBtn = TextView(context).apply {
-            text = "⏹  Stop"
-            setTextColor(Color.WHITE)
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(dp(16), dp(11), dp(16), dp(11))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(10).toFloat()
-                setColor(Color.parseColor("#C62828"))
-            }
-            alpha = 0.4f
-            isEnabled = false
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(6)
-            }
-            setOnClickListener {
-                onStopCapture?.invoke()
-            }
-        }
+        stopBtn = makeActionBtn("⏹ Stop", "#C62828") { onStopCapture?.invoke() }
+        stopBtn!!.alpha = 0.4f; stopBtn!!.isEnabled = false
+        stopBtn!!.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(4) }
         btnRow.addView(stopBtn)
         root.addView(btnRow)
 
         return root
     }
 
-    // ─── Drawable Helpers ──────────────────────────────────────
+    // ─── Helpers ───────────────────────────────────────────────
 
-    private fun makeRoundedRect(colorHex: String, radiusDp: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(radiusDp).toFloat()
-            setColor(Color.parseColor(colorHex))
-            setStroke(1, Color.parseColor("#20FFFFFF"))
+    private fun makeHeaderBtn(text: String, onClick: () -> Unit) = TextView(context).apply {
+        this.text = text; setTextColor(Color.parseColor("#80FFFFFF")); textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE; cornerRadius = dp(6).toFloat()
+            setColor(Color.parseColor("#10FFFFFF"))
+        }
+        setPadding(dp(8), dp(2), dp(8), dp(2))
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = dp(4) }
+        setOnClickListener { onClick() }
+    }
+
+    private fun makeActionBtn(text: String, c: String, onClick: () -> Unit) = TextView(context).apply {
+        this.text = text; setTextColor(Color.WHITE); textSize = 11f
+        typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+        setPadding(dp(10), dp(8), dp(10), dp(8))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE; cornerRadius = dp(10).toFloat()
+            setColor(Color.parseColor(c))
+        }
+        setOnClickListener { onClick() }
+    }
+
+    private fun makeScoreChip(label: String) = TextView(context).apply {
+        text = label; setTextColor(Color.parseColor("#B0FFFFFF")); textSize = 10f
+        typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+        setPadding(dp(10), dp(5), dp(10), dp(5))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE; cornerRadius = dp(8).toFloat()
+            setColor(Color.parseColor("#10FFFFFF"))
+        }
+        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginStart = dp(2); marginEnd = dp(2)
         }
     }
 
-    private fun makeDot(color: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color)
-            setSize(dp(8), dp(8))
-        }
+    private fun makeToggleBg(on: Boolean, accentHex: String) = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE; cornerRadius = dp(8).toFloat()
+        setColor(if (on) Color.parseColor("#1A${accentHex.removePrefix("#")}") else Color.parseColor("#10FFFFFF"))
+        setStroke(1, if (on) Color.parseColor("#30${accentHex.removePrefix("#")}") else Color.parseColor("#15FFFFFF"))
     }
 
-    private fun makeDivider(): View {
-        return View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 1
-            ).apply {
-                topMargin = dp(8)
-                bottomMargin = dp(4)
-            }
-            setBackgroundColor(Color.parseColor("#20FFFFFF"))
+    private fun makeDot(color: Int) = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL; setColor(color); setSize(dp(7), dp(7))
+    }
+
+    private fun makeDivider() = View(context).apply {
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
+            topMargin = dp(4); bottomMargin = dp(2)
         }
+        setBackgroundColor(Color.parseColor("#15FFFFFF"))
     }
 }

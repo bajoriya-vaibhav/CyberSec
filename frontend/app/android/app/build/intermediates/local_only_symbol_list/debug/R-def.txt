@@ -17,8 +17,13 @@ color status_capturing
 color status_idle
 color teal_200
 color white
+drawable card_bg
+drawable input_bg
 drawable status_dot
 id btnStartOverlay
+id editServerUrl
+id seekDuration
+id txtDurationValue
 layout activity_main
 mipmap ic_launcher
 string app_name

@@ -17,13 +17,16 @@ import kotlinx.coroutines.*
 import java.util.concurrent.CancellationException
 
 /**
- * Foreground service with two phases:
- *   Phase 1 (SHOW_OVERLAY): Shows the floating overlay, waits for user to tap Start
- *   Phase 2 (START_CAPTURE): Begins screen+audio capture and API loop
- *   STOP_CAPTURE: Stops capture but keeps overlay visible
+ * Foreground service for continuous deepfake streaming analysis.
  *
- * Now integrates with the real FastAPI backend, passing full PredictionResult
- * to the overlay for rich display.
+ * Three modes:
+ *   IDLE     → Overlay shown, no capture running
+ *   SCANNING → Auto-mode: captures a frame every 2s, POSTs to /check_person
+ *              When person detected → auto-transitions to STREAMING
+ *   STREAMING → Full WebSocket streaming to /ws/analyze
+ *               If server reports no person for 3 consecutive results → auto-pause → SCANNING
+ *
+ * Manual start/stop always available regardless of auto mode.
  */
 class CaptureService : Service() {
 
@@ -31,9 +34,9 @@ class CaptureService : Service() {
         private const val TAG = "CaptureService"
         private const val CHANNEL_ID = "deepfake_capture_channel"
         private const val NOTIFICATION_ID = 1001
-        private const val FRAME_INTERVAL_MS = 1000L         // Send every 1s
-        private const val HEALTH_CHECK_TIMEOUT_MS = 5000L    // Health check timeout
-        private const val MAX_CONSECUTIVE_ERRORS = 5         // Auto-pause after this many errors
+        private const val FRAME_INTERVAL_MS = 3000L       // Streaming: send frame every 3s
+        private const val SCAN_INTERVAL_MS = 2500L        // Scanning: check every 2.5s
+        private const val NO_PERSON_THRESHOLD = 3          // Stop after N consecutive no-person results
 
         const val ACTION_SHOW_OVERLAY = "com.deepfake.capture.SHOW_OVERLAY"
         const val ACTION_START_CAPTURE = "com.deepfake.capture.START_CAPTURE"
@@ -42,21 +45,32 @@ class CaptureService : Service() {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
         const val EXTRA_SERVER_URL = "server_url"
+
+        private const val PREFS_NAME = "deepfake_prefs"
+        private const val KEY_SERVER_URL = "server_url"
+        private const val KEY_ANALYSIS_DURATION = "analysis_duration"
+        private const val KEY_AUTO_MODE = "auto_mode"
     }
 
+    private enum class CaptureState { IDLE, SCANNING, STREAMING }
+
+    private var state = CaptureState.IDLE
     private var mediaProjectionHelper: MediaProjectionHelper? = null
     private var videoFrameCapturer: VideoFrameCapturer? = null
     private var audioCapturer: AudioCapturer? = null
-    private var apiClient: ApiClient? = null
+    private var streamingClient: StreamingClient? = null
     private var overlayManager: OverlayManager? = null
     private var captureJob: Job? = null
+    private var scanJob: Job? = null
+    private var consecutiveNoPersonResults = 0
+    private var manualMode = false  // true when user manually started (bypasses auto-stop)
+
     private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
         Log.e(TAG, "Uncaught coroutine exception", throwable)
         overlayManager?.updateStatus("❌ Error: ${throwable.message?.take(40)}")
     }
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main + exceptionHandler)
 
-    // Store MediaProjection token for later use
     private var storedResultCode: Int = Int.MIN_VALUE
     private var storedResultData: Intent? = null
 
@@ -74,19 +88,18 @@ class CaptureService : Service() {
 
         when (action) {
             ACTION_SHOW_OVERLAY -> handleShowOverlay(intent)
-            ACTION_START_CAPTURE -> handleStartCapture(intent)
-            ACTION_STOP_CAPTURE -> handleStopCapture()
+            ACTION_START_CAPTURE -> handleStartCapture(isManual = true)
+            ACTION_STOP_CAPTURE -> handleStopCapture(isManual = true)
         }
 
         return START_STICKY
     }
 
-    // ─── Phase 1: Show overlay, store projection token ─────────
+    // ─── Phase 1: Show overlay, optionally start scanning ──────
 
     private fun handleShowOverlay(intent: Intent?) {
         startForeground(NOTIFICATION_ID, createNotification())
 
-        // Store the MediaProjection token
         if (intent != null) {
             val code = intent.getIntExtra(EXTRA_RESULT_CODE, Int.MIN_VALUE)
             if (code != Int.MIN_VALUE) {
@@ -97,193 +110,333 @@ class CaptureService : Service() {
                     @Suppress("DEPRECATION")
                     intent.getParcelableExtra(EXTRA_RESULT_DATA)
                 }
-                Log.i(TAG, "MediaProjection token stored (code=$storedResultCode)")
+                Log.i(TAG, "MediaProjection token stored")
             }
         }
 
-        // Show overlay if not already visible
         if (overlayManager == null && Settings.canDrawOverlays(this)) {
             overlayManager = OverlayManager(this)
 
-            overlayManager?.onStartCapture = { serverUrl ->
-                Log.i(TAG, "Overlay: Start requested, url=$serverUrl")
-                val startIntent = Intent(this, CaptureService::class.java).apply {
-                    action = ACTION_START_CAPTURE
-                    putExtra(EXTRA_SERVER_URL, serverUrl)
-                }
-                startService(startIntent)
+            overlayManager?.onStartCapture = { _ ->
+                Log.i(TAG, "Manual start requested")
+                handleStartCapture(isManual = true)
             }
 
             overlayManager?.onStopCapture = {
-                Log.i(TAG, "Overlay: Stop requested")
-                val stopIntent = Intent(this, CaptureService::class.java).apply {
-                    action = ACTION_STOP_CAPTURE
-                }
-                startService(stopIntent)
+                Log.i(TAG, "Manual stop requested")
+                handleStopCapture(isManual = true)
             }
 
             overlayManager?.onCloseOverlay = {
-                Log.i(TAG, "Overlay: Close requested, completely stopping service")
-                stopSelf() // Stop the foreground service completely
+                Log.i(TAG, "Close overlay → stop service")
+                stopSelf()
+            }
+
+            overlayManager?.onAudioToggleChanged = { audioEnabled ->
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val duration = prefs.getInt(KEY_ANALYSIS_DURATION, 15)
+                streamingClient?.sendConfig(duration, audioEnabled)
+            }
+
+            overlayManager?.onAutoToggleChanged = { autoEnabled ->
+                Log.i(TAG, "Auto mode: $autoEnabled")
+                if (autoEnabled && state == CaptureState.IDLE) {
+                    startScanning()
+                } else if (!autoEnabled && state == CaptureState.SCANNING) {
+                    stopScanning()
+                    overlayManager?.updateStatus("Ready")
+                    state = CaptureState.IDLE
+                }
             }
 
             overlayManager?.show()
-            Log.i(TAG, "Overlay shown, waiting for user action")
+            Log.i(TAG, "Overlay shown")
+
+            // Auto-start scanning if auto mode is enabled
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val autoMode = prefs.getBoolean(KEY_AUTO_MODE, true)
+            if (autoMode) {
+                serviceScope.launch {
+                    delay(1000) // Let overlay settle
+                    if (state == CaptureState.IDLE && overlayManager?.isAutoEnabled == true) {
+                        startScanning()
+                    }
+                }
+            }
         }
     }
 
-    // ─── Phase 2: Start capturing ──────────────────────────────
+    // ─── Scanning Mode (lightweight person detection) ──────────
 
-    private fun handleStartCapture(intent: Intent?) {
-        val serverUrl = intent?.getStringExtra(EXTRA_SERVER_URL) ?: ""
+    private fun startScanning() {
+        if (state == CaptureState.STREAMING) return // Don't scan while streaming
+        if (scanJob?.isActive == true) return
+
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val serverUrl = prefs.getString(KEY_SERVER_URL, "") ?: ""
 
         if (storedResultCode == Int.MIN_VALUE || storedResultData == null) {
-            Log.e(TAG, "No MediaProjection token available!")
             overlayManager?.updateStatus("⚠️ No screen permission")
             return
         }
-
         if (serverUrl.isBlank()) {
-            overlayManager?.updateStatus("⚠️ Enter server URL")
+            overlayManager?.updateStatus("⚠️ Set server URL in app")
             return
         }
 
-        // Run health check first
+        state = CaptureState.SCANNING
+
+        // Ensure video capture is initialized for scanning
+        if (videoFrameCapturer == null) {
+            try {
+                initializeVideoCapture()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to init video for scanning", e)
+                overlayManager?.updateStatus("❌ Screen capture error")
+                state = CaptureState.IDLE
+                return
+            }
+        }
+
+        overlayManager?.updateStatus("👁 Scanning for person…")
+        overlayManager?.setScanningState(true)
+        Log.i(TAG, "Scanning started")
+
+        scanJob = serviceScope.launch {
+            val apiClient = ApiClient(serverUrl)
+
+            while (isActive && state == CaptureState.SCANNING) {
+                delay(SCAN_INTERVAL_MS)
+
+                val frame = videoFrameCapturer?.consumeLatestFrame()
+                if (frame == null) {
+                    continue
+                }
+
+                try {
+                    val personDetected = apiClient.checkPerson(frame)
+
+                    if (personDetected) {
+                        Log.i(TAG, "Person detected! Auto-starting streaming")
+                        overlayManager?.updateStatus("👤 Person detected!")
+                        delay(300) // Brief notification
+                        handleStartCapture(isManual = false)
+                        return@launch // Exit scan loop
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Scan check failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun stopScanning() {
+        scanJob?.cancel()
+        scanJob = null
+        overlayManager?.setScanningState(false)
+    }
+
+    // ─── Streaming Mode ────────────────────────────────────────
+
+    private fun handleStartCapture(isManual: Boolean) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val serverUrl = prefs.getString(KEY_SERVER_URL, "") ?: ""
+        val duration = prefs.getInt(KEY_ANALYSIS_DURATION, 15)
+        val audioEnabled = overlayManager?.isAudioEnabled ?: false
+
+        if (storedResultCode == Int.MIN_VALUE || storedResultData == null) {
+            overlayManager?.updateStatus("⚠️ No screen permission")
+            return
+        }
+        if (serverUrl.isBlank()) {
+            overlayManager?.updateStatus("⚠️ Set server URL in app")
+            return
+        }
+
+        manualMode = isManual
+        consecutiveNoPersonResults = 0
+        stopScanning()
+
         overlayManager?.updateStatus("🔌 Connecting…")
         serviceScope.launch {
-            val client = ApiClient(serverUrl)
+            // Health check
             val healthy = try {
-                withTimeout(HEALTH_CHECK_TIMEOUT_MS) {
-                    client.checkHealth()
-                }
-            } catch (e: CancellationException) {
-                throw e  // Don't swallow coroutine cancellation
-            } catch (e: Exception) {
-                Log.e(TAG, "Health check failed", e)
-                false
-            }
+                withTimeout(5000) { ApiClient(serverUrl).checkHealth() }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { false }
 
             if (!healthy) {
                 overlayManager?.updateStatus("❌ Server unreachable")
                 overlayManager?.setCapturingState(false)
+                if (overlayManager?.isAutoEnabled == true) startScanning()
                 return@launch
             }
 
             try {
-                initializeCapture(serverUrl)
-                overlayManager?.setCapturingState(true)
-                overlayManager?.updateStatus("📡 Capturing…")
+                // Ensure video + audio capture running
+                if (videoFrameCapturer == null) initializeVideoCapture()
+                if (audioCapturer == null) initializeAudioCapture()
+
+                state = CaptureState.STREAMING
+
+                streamingClient = StreamingClient(serverUrl).apply {
+                    onConnected = {
+                        serviceScope.launch(Dispatchers.Main) {
+                            overlayManager?.setCapturingState(true)
+                            overlayManager?.updateStatus("📡 Streaming…")
+                            sendConfig(duration, audioEnabled)
+                        }
+                    }
+                    onResult = { result ->
+                        serviceScope.launch(Dispatchers.Main) {
+                            handleServerResult(result)
+                        }
+                    }
+                    onStatus = { buffered, secLeft ->
+                        serviceScope.launch(Dispatchers.Main) {
+                            overlayManager?.updateStreamingProgress(
+                                buffered, secLeft, this@apply.framesSent
+                            )
+                        }
+                    }
+                    onAnalyzing = { _ -> /* silent */ }
+                    onDisconnected = { reason ->
+                        serviceScope.launch(Dispatchers.Main) {
+                            overlayManager?.updateStatus("❌ Disconnected")
+                            overlayManager?.setCapturingState(false)
+                            stopStreaming()
+                            if (overlayManager?.isAutoEnabled == true) startScanning()
+                        }
+                    }
+                    onError = { msg ->
+                        serviceScope.launch(Dispatchers.Main) {
+                            overlayManager?.updateStatus("❌ $msg")
+                        }
+                    }
+                }
+                streamingClient?.connect()
+                startStreamingLoop()
+
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start capture", e)
-                overlayManager?.updateStatus("❌ ${e.message}")
+                Log.e(TAG, "Failed to start streaming", e)
+                overlayManager?.updateStatus("❌ ${e.message?.take(40)}")
                 overlayManager?.setCapturingState(false)
+                state = CaptureState.IDLE
             }
         }
     }
 
-    private fun initializeCapture(serverUrl: String) {
-        // Clean up any previous capture
-        stopCapture()
+    /**
+     * Handle a result from the server.
+     * If person_detected is false for N consecutive results → auto-pause.
+     */
+    private fun handleServerResult(result: ApiClient.PredictionResult) {
+        if (!result.personDetected) {
+            consecutiveNoPersonResults++
+            Log.i(TAG, "No person detected ($consecutiveNoPersonResults/$NO_PERSON_THRESHOLD)")
 
-        // Create MediaProjection only if it doesn't already exist
+            if (!manualMode && consecutiveNoPersonResults >= NO_PERSON_THRESHOLD) {
+                Log.i(TAG, "Auto-pausing: no person for $NO_PERSON_THRESHOLD cycles")
+                overlayManager?.showNoPersonNotification()
+                handleStopCapture(isManual = false)
+                return
+            }
+        } else {
+            consecutiveNoPersonResults = 0
+        }
+
+        overlayManager?.showBatchResult(result)
+    }
+
+    private fun startStreamingLoop() {
+        captureJob = serviceScope.launch {
+            delay(500)
+            while (isActive && state == CaptureState.STREAMING) {
+                delay(FRAME_INTERVAL_MS)
+                val frame = videoFrameCapturer?.consumeLatestFrame()
+                if (frame != null) {
+                    streamingClient?.sendFrame(frame)
+                }
+                if (overlayManager?.isAudioEnabled == true) {
+                    val audio = audioCapturer?.consumeLatestSegment()
+                    if (audio != null) {
+                        streamingClient?.sendAudio(audio)
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── Stop ──────────────────────────────────────────────────
+
+    private fun handleStopCapture(isManual: Boolean) {
+        stopStreaming()
+        overlayManager?.setCapturingState(false)
+
+        if (isManual) {
+            overlayManager?.updateStatus("Idle")
+            manualMode = false
+            state = CaptureState.IDLE
+            // If auto mode, resume scanning after manual stop
+            if (overlayManager?.isAutoEnabled == true) {
+                serviceScope.launch {
+                    delay(2000)
+                    if (state == CaptureState.IDLE) startScanning()
+                }
+            }
+        } else {
+            // Auto-stop: resume scanning
+            state = CaptureState.IDLE
+            if (overlayManager?.isAutoEnabled == true) {
+                serviceScope.launch {
+                    delay(3000) // Wait a bit before rescanning
+                    if (state == CaptureState.IDLE) startScanning()
+                }
+            }
+        }
+    }
+
+    private fun stopStreaming() {
+        captureJob?.cancel()
+        captureJob = null
+        streamingClient?.disconnect()
+        streamingClient = null
+        state = CaptureState.IDLE
+    }
+
+    // ─── Initialization Helpers ────────────────────────────────
+
+    private fun initializeVideoCapture() {
         if (mediaProjectionHelper == null) {
-            Log.i(TAG, "Creating MediaProjection...")
             mediaProjectionHelper = MediaProjectionHelper(this)
             mediaProjectionHelper!!.createProjection(storedResultCode, storedResultData!!)
                 ?: throw RuntimeException("MediaProjection returned null")
         }
         val projection = mediaProjectionHelper!!.getProjection()!!
 
-        // Screen metrics
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
         wm.defaultDisplay.getRealMetrics(metrics)
-        val captureWidth = metrics.widthPixels
-        val captureHeight = metrics.heightPixels
-        val density = metrics.densityDpi
 
-        // Initialize capturers
-        videoFrameCapturer = VideoFrameCapturer(projection, captureWidth, captureHeight, density)
-        audioCapturer = AudioCapturer(projection)
-        apiClient = ApiClient(serverUrl)
-
+        videoFrameCapturer = VideoFrameCapturer(
+            projection, metrics.widthPixels, metrics.heightPixels, metrics.densityDpi
+        )
         try { videoFrameCapturer?.start() } catch (e: Exception) {
-            Log.e(TAG, "Video init failed", e); videoFrameCapturer = null
+            Log.e(TAG, "Video init failed", e)
+            videoFrameCapturer = null
+            throw e
         }
+    }
+
+    private fun initializeAudioCapture() {
+        val projection = mediaProjectionHelper?.getProjection() ?: return
+        audioCapturer = AudioCapturer(projection)
         try { audioCapturer?.start(serviceScope) } catch (e: Exception) {
-            Log.e(TAG, "Audio init failed", e); audioCapturer = null
-        }
-
-        startCaptureLoop()
-        Log.i(TAG, "Capture started: ${captureWidth}x${captureHeight} @ $serverUrl")
-    }
-
-    // ─── Stop capture (keep overlay) ───────────────────────────
-
-    private fun handleStopCapture() {
-        stopCapture()
-        overlayManager?.setCapturingState(false)
-        overlayManager?.updateStatus("Idle")
-        // Keep stored token and MediaProjection active so we can start again
-        Log.i(TAG, "Capture stopped, overlay remains, projection kept alive")
-    }
-
-    private fun stopCapture() {
-        captureJob?.cancel()
-        captureJob = null
-        try { videoFrameCapturer?.stop() } catch (e: Exception) { Log.w(TAG, "Error stopping video", e) }
-        try { audioCapturer?.stop() } catch (e: Exception) { Log.w(TAG, "Error stopping audio", e) }
-        // Do not stop mediaProjectionHelper here so we can reuse it
-        videoFrameCapturer = null
-        audioCapturer = null
-    }
-
-    // ─── Capture Loop ──────────────────────────────────────────
-
-    private fun startCaptureLoop() {
-        captureJob = serviceScope.launch {
-            delay(500) // Stabilize
-
-            var consecutiveErrors = 0
-
-            while (isActive) {
-                delay(FRAME_INTERVAL_MS)
-
-                try {
-                    val frame = videoFrameCapturer?.consumeLatestFrame()
-                    val audio = audioCapturer?.consumeLatestSegment()
-
-                    if (frame != null || audio != null) {
-                        overlayManager?.updateStatus("🔍 Analyzing…")
-
-                        val result = apiClient?.sendForPrediction(frame, audio)
-
-                        if (result != null) {
-                            consecutiveErrors = 0  // Reset error counter
-                            overlayManager?.accumulateResult(result)
-                        } else {
-                            consecutiveErrors++
-                            if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-                                overlayManager?.updateStatus("❌ Server not responding")
-                                Log.e(TAG, "Too many errors, pausing capture loop")
-                                delay(5000) // Back off
-                                consecutiveErrors = 0
-                            } else {
-                                overlayManager?.updateStatus("📡 Retrying…")
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Capture loop error", e)
-                    consecutiveErrors++
-                    if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-                        overlayManager?.updateStatus("❌ Connection lost")
-                        delay(5000)
-                        consecutiveErrors = 0
-                    }
-                }
-            }
+            Log.e(TAG, "Audio init failed", e)
+            audioCapturer = null
         }
     }
 
@@ -291,10 +444,15 @@ class CaptureService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "=== CaptureService onDestroy ===")
-        stopCapture()
-        try { mediaProjectionHelper?.stop() } catch (e: Exception) { Log.w(TAG, "Error stopping projection", e) }
+        stopScanning()
+        stopStreaming()
+        try { videoFrameCapturer?.stop() } catch (e: Exception) {}
+        try { audioCapturer?.stop() } catch (e: Exception) {}
+        videoFrameCapturer = null
+        audioCapturer = null
+        try { mediaProjectionHelper?.stop() } catch (e: Exception) {}
         mediaProjectionHelper = null
-        try { overlayManager?.hide() } catch (e: Exception) { Log.w(TAG, "Error hiding overlay", e) }
+        try { overlayManager?.hide() } catch (e: Exception) {}
         overlayManager = null
         serviceScope.cancel()
         super.onDestroy()
@@ -305,19 +463,15 @@ class CaptureService : Service() {
             CHANNEL_ID,
             getString(R.string.notification_channel_name),
             NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = getString(R.string.notification_channel_desc)
-        }
+        ).apply { description = getString(R.string.notification_channel_desc) }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
     private fun createNotification(): Notification {
         val pendingIntent = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java),
+            this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_title))
             .setContentText(getString(R.string.notification_text))

@@ -1,5 +1,5 @@
 """
-Main orchestrator for multimodal deepfake detection with Gemini integration.
+Main orchestrator for multimodal deepfake detection with GenConViT integration.
 """
 import logging
 from typing import Dict, Any, Optional, List
@@ -9,7 +9,6 @@ from config import Config
 from utils.video_processor import VideoProcessor
 from utils.audio_processor import AudioProcessor
 from detectors.audio_detector import AudioDetector
-from detectors.video_detector import VideoDetector
 from detectors.base_detector import DetectionResult
 from fusion.fusion_strategy import (
     SecurityFirstFusionStrategy, 
@@ -20,6 +19,13 @@ from fusion.fusion_strategy import (
 )
 from rl_system import RLAdaptiveFusion
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO if Config.VERBOSE else logging.WARNING,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Try to import Gemini detector
 try:
     from detectors.gemini_detector import GeminiDetector
@@ -28,18 +34,11 @@ except ImportError:
     GEMINI_AVAILABLE = False
     logger.warning("Gemini detector not available")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO if Config.VERBOSE else logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
 
 class DeepFakeDetector:
     """
     Main detector orchestrating video and audio analysis.
-    Supports both Gemini API and local models with automatic fallback.
+    Supports GenConViT (CVIT), HuggingFace models, and Gemini API with automatic fallback.
     """
     
     def __init__(self, fusion_strategy: FusionStrategy = None):
@@ -70,11 +69,21 @@ class DeepFakeDetector:
                 logger.warning(f"Failed to initialize Gemini: {e}. Will use local models.")
                 self.gemini_detector = None
         
-        # Initialize local detectors (always available as fallback)
-        logger.info("Loading local models...")
+        # ─── Video Detector (GenConViT) ────────────────────────────
+        logger.info("Loading GenConViT (CVIT) video detector...")
+        from detectors.cvit_detector import CvitDetector
+        self.video_detector = CvitDetector(
+            net=Config.CVIT_NET,
+            ed_weight=Config.CVIT_ED_WEIGHT,
+            vae_weight=Config.CVIT_VAE_WEIGHT,
+            fp16=Config.CVIT_FP16,
+        )
+        logger.info("GenConViT video detector loaded successfully")
+        
+        # ─── Audio Detector (Wav2Vec2) ──────────────────────────
+        logger.info("Loading Wav2Vec2 audio detector...")
         self.audio_detector = AudioDetector(Config.AUDIO_MODEL)
-        self.video_detector = VideoDetector(Config.VIDEO_MODEL)
-        logger.info("Local models loaded successfully")
+        logger.info("Wav2Vec2 audio detector loaded successfully")
         
         # Initialize fusion strategy based on config
         if fusion_strategy is None:

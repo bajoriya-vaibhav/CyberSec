@@ -5,15 +5,22 @@ Configuration module for deepfake detection system.
 class Config:
     """Central configuration for the deepfake detection system."""
     
-    # Gemini API Configuration
-    GEMINI_API_KEY = "AIzaSyCSz7HeKZI3YVKqortMu_MRGdXbPY06nS4"
-    GEMINI_MODEL = "gemini-2.5-flash"  # Free tier model with good performance
-    GEMINI_FRAMES = 7  # Send more frames for better temporal analysis
-    USE_GEMINI = False  # Set to False to always use local models
+    # ─── Video Model (GenConViT) ─────────────────────────────────
     
-    # Local Model configurations (fallback)
-    AUDIO_MODEL = "MelodyMachine/Deepfake-audio-detection-V2"
-    VIDEO_MODEL = "prithivMLmods/Deep-Fake-Detector-v2-Model"
+    # GenConViT (CVIT) Configuration
+    CVIT_NET = 'genconvit'                         # 'genconvit' (both ED+VAE), 'ed', or 'vae'
+    CVIT_ED_WEIGHT = 'genconvit_ed_inference'      # ED weight filename (without .pth)
+    CVIT_VAE_WEIGHT = 'genconvit_vae_inference'    # VAE weight filename (without .pth)
+    CVIT_FP16 = False                              # Use half precision (faster on GPU)
+    
+    # Gemini API Configuration (optional, disabled by default)
+    GEMINI_API_KEY = "[ENCRYPTION_KEY]"
+    GEMINI_MODEL = "gemini-2.5-flash"
+    GEMINI_FRAMES = 7
+    USE_GEMINI = False
+    
+    # Audio Model — Wav2Vec2 deepfake voice detector
+    AUDIO_MODEL = "garystafford/wav2vec2-deepfake-voice-detector"
     
     # Video processing parameters
     NUM_FRAMES_TO_EXTRACT = 10  # Extract more frames for better accuracy
@@ -23,9 +30,9 @@ class Config:
     # Options: 'security_first', 'weighted', 'max', 'adaptive', 'rl_adaptive', 'advanced_rl'
     FUSION_MODE = 'rl_adaptive'  # Use simple RL with feedback learning
     
-    # Fusion weights (for weighted mode & RL initial weights)
-    VIDEO_WEIGHT = 0.9  # Start with 90% video weight (stronger!)
-    AUDIO_WEIGHT = 0.1  # Start with 10% audio weight
+    # Fusion weights — GenConViT is primary, audio is supplementary
+    VIDEO_WEIGHT = 0.95  # GenConViT video model (primary)
+    AUDIO_WEIGHT = 0.05  # HuggingFace audio model (secondary)
     
     # RL Configuration (simple gradient-based RL - no external libraries)
     RL_LEARNING_RATE = 0.05  # How fast to adapt weights (5% per feedback)

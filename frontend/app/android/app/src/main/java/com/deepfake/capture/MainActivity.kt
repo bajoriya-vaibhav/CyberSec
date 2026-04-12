@@ -3,6 +3,7 @@ package com.deepfake.capture
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -10,6 +11,9 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
+import android.widget.EditText
+import android.widget.SeekBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
@@ -17,28 +21,73 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
 /**
- * Minimal launcher activity. Requests permissions, obtains MediaProjection token,
- * starts CaptureService (which shows the floating overlay), then minimizes itself.
+ * Main settings screen for DeepGuard.
+ *
+ * Configures:
+ *   - Server URL (saved to SharedPrefs, read by overlay/service)
+ *   - Analysis duration (3-30 seconds per cycle)
+ *
+ * On "Enable Overlay": requests permissions → starts CaptureService → minimizes.
  */
 class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
         private const val OVERLAY_PERMISSION_REQUEST = 1001
+        private const val PREFS_NAME = "deepfake_prefs"
+        private const val KEY_SERVER_URL = "server_url"
+        private const val KEY_ANALYSIS_DURATION = "analysis_duration"
     }
 
     private lateinit var projectionLauncher: ActivityResultLauncher<Intent>
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
+    private lateinit var prefs: SharedPreferences
+
+    private lateinit var serverUrlInput: EditText
+    private lateinit var durationSeekBar: SeekBar
+    private lateinit var durationValueText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+
+        // Bind UI
+        serverUrlInput = findViewById(R.id.editServerUrl)
+        durationSeekBar = findViewById(R.id.seekDuration)
+        durationValueText = findViewById(R.id.txtDurationValue)
+
+        // Restore saved settings
+        val savedUrl = prefs.getString(KEY_SERVER_URL, "http://10.0.2.2:7860") ?: ""
+        serverUrlInput.setText(savedUrl)
+
+        val savedDuration = prefs.getInt(KEY_ANALYSIS_DURATION, 15)
+        durationSeekBar.progress = savedDuration
+        durationValueText.text = "$savedDuration seconds"
+
+        // Duration slider listener
+        durationSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val value = progress.coerceAtLeast(3) // Minimum 3 seconds
+                durationValueText.text = "$value seconds"
+                prefs.edit().putInt(KEY_ANALYSIS_DURATION, value).apply()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        // Auto-save URL on focus change
+        serverUrlInput.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) saveServerUrl()
+        }
 
         // Register launchers
         projectionLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
             if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+                saveServerUrl() // Save before launching service
                 launchServiceWithOverlay(result.resultCode, result.data!!)
             } else {
                 Toast.makeText(this, "Screen capture permission denied", Toast.LENGTH_SHORT).show()
@@ -55,14 +104,34 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Hook up the button
+        // Enable Overlay button
         findViewById<Button>(R.id.btnStartOverlay).setOnClickListener {
+            saveServerUrl()
+
+            val url = serverUrlInput.text.toString().trim()
+            if (url.isBlank()) {
+                Toast.makeText(this, "Please enter a server URL", Toast.LENGTH_SHORT).show()
+                serverUrlInput.requestFocus()
+                return@setOnClickListener
+            }
+
             startPermissionFlow()
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        saveServerUrl()
+    }
+
+    private fun saveServerUrl() {
+        val url = serverUrlInput.text.toString().trim()
+        prefs.edit().putString(KEY_SERVER_URL, url).apply()
+    }
+
+    // ─── Permission Flow ───────────────────────────────────────
+
     private fun startPermissionFlow() {
-        // Step 1: Runtime permissions (RECORD_AUDIO, POST_NOTIFICATIONS)
         val needed = mutableListOf<String>()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
@@ -84,7 +153,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Step 2: Overlay permission
     private fun checkOverlayPermission() {
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Please enable 'Display over other apps'", Toast.LENGTH_LONG).show()
@@ -105,18 +173,16 @@ class MainActivity : AppCompatActivity() {
             if (Settings.canDrawOverlays(this)) {
                 requestScreenCapture()
             } else {
-                Toast.makeText(this, "Overlay permission required for floating controls", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Overlay permission required", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    // Step 3: MediaProjection
     private fun requestScreenCapture() {
         val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projectionLauncher.launch(manager.createScreenCaptureIntent())
     }
 
-    // Step 4: Launch service and minimize
     private fun launchServiceWithOverlay(resultCode: Int, data: Intent) {
         val serviceIntent = Intent(this, CaptureService::class.java).apply {
             action = CaptureService.ACTION_SHOW_OVERLAY
@@ -125,9 +191,7 @@ class MainActivity : AppCompatActivity() {
         }
         startForegroundService(serviceIntent)
 
-        Toast.makeText(this, "Deepfake Detector overlay active!", Toast.LENGTH_SHORT).show()
-
-        // Minimize the app — user interacts via the floating overlay
+        Toast.makeText(this, "DeepGuard overlay active!", Toast.LENGTH_SHORT).show()
         moveTaskToBack(true)
     }
 }

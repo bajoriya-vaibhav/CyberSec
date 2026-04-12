@@ -2906,6 +2906,7 @@ drawable btn_radio_off_mtrl
 drawable btn_radio_off_to_on_mtrl_animation
 drawable btn_radio_on_mtrl
 drawable btn_radio_on_to_off_mtrl_animation
+drawable card_bg
 drawable design_fab_background
 drawable design_ic_visibility
 drawable design_ic_visibility_off
@@ -2929,6 +2930,7 @@ drawable ic_mtrl_chip_checked_black
 drawable ic_mtrl_chip_checked_circle
 drawable ic_mtrl_chip_close_circle
 drawable ic_search_black_24
+drawable input_bg
 drawable m3_avd_hide_password
 drawable m3_avd_show_password
 drawable m3_bottom_sheet_drag_handle
@@ -3154,6 +3156,7 @@ id easeIn
 id easeInOut
 id easeOut
 id edge
+id editServerUrl
 id edit_query
 id edit_text_id
 id elastic
@@ -3357,6 +3360,7 @@ id search_mag_icon
 id search_plate
 id search_src_text
 id search_voice_btn
+id seekDuration
 id select_dialog_listview
 id selected
 id selection_type
@@ -3438,6 +3442,7 @@ id transition_position
 id transition_scene_layoutid_cache
 id transition_transform
 id triangle
+id txtDurationValue
 id unchecked
 id uniform
 id unlabeled

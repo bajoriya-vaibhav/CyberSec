@@ -1,28 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/dark_bg">
+    android:background="@color/dark_bg"
+    android:fillViewport="true">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:gravity="center"
+        android:gravity="center_horizontal"
         android:orientation="vertical"
-        android:padding="32dp">
+        android:padding="28dp">
 
+        <!-- Logo -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginTop="36dp"
             android:text="🛡️"
-            android:textSize="80sp" />
+            android:textSize="72sp" />
 
+        <!-- Title -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:text="@string/app_name"
+            android:layout_marginTop="16dp"
+            android:text="DeepGuard"
             android:textColor="@color/white"
             android:textSize="28sp"
             android:textStyle="bold" />
@@ -30,24 +33,149 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Detect deepfake audio and video in real-time.\n\nTap the button below to grant required permissions and enable the floating detector overlay."
-            android:gravity="center"
-            android:textColor="#B0FFFFFF"
-            android:lineSpacingExtra="4dp"
+            android:layout_marginTop="6dp"
+            android:text="Real-time deepfake detection"
+            android:textColor="#80FFFFFF"
             android:textSize="14sp" />
 
+        <!-- Server URL Section -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
+            android:orientation="vertical"
+            android:background="@drawable/card_bg"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🔗  Server URL"
+                android:textColor="#E0E0E0"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/editServerUrl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/input_bg"
+                android:hint="http://10.0.2.2:7860"
+                android:textColorHint="#40FFFFFF"
+                android:textColor="#F0F0F0"
+                android:textSize="13sp"
+                android:padding="12dp"
+                android:singleLine="true"
+                android:inputType="textUri"
+                android:imeOptions="actionDone" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Use 10.0.2.2 for emulator, ngrok URL for physical device"
+                android:textColor="#50FFFFFF"
+                android:textSize="10sp" />
+
+        </LinearLayout>
+
+        <!-- Analysis Duration Section -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="vertical"
+            android:background="@drawable/card_bg"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="⏱  Analysis Duration"
+                android:textColor="#E0E0E0"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/txtDurationValue"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="15 seconds"
+                android:textColor="#4FC3F7"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <SeekBar
+                android:id="@+id/seekDuration"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:min="3"
+                android:max="30"
+                android:progress="15"
+                android:progressTint="#4FC3F7"
+                android:thumbTint="#4FC3F7" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="3s"
+                    android:textColor="#40FFFFFF"
+                    android:textSize="10sp" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:gravity="end"
+                    android:text="30s"
+                    android:textColor="#40FFFFFF"
+                    android:textSize="10sp" />
+
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Longer = more frames = more accurate results"
+                android:textColor="#50FFFFFF"
+                android:textSize="10sp" />
+
+        </LinearLayout>
+
+        <!-- Enable Overlay Button -->
         <Button
             android:id="@+id/btnStartOverlay"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="48dp"
+            android:layout_marginTop="24dp"
             android:padding="16dp"
-            android:backgroundTint="#4CAF50"
+            android:backgroundTint="#2E7D32"
             android:textColor="@color/white"
             android:textStyle="bold"
-            android:text="Enable Overlay" />
+            android:textSize="15sp"
+            android:text="🛡️  Enable Overlay" />
+
+        <!-- Info text -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:gravity="center"
+            android:lineSpacingExtra="4dp"
+            android:text="Settings are saved automatically.\nUse the floating overlay to start/stop analysis."
+            android:textColor="#50FFFFFF"
+            android:textSize="11sp" />
 
     </LinearLayout>
 
-</FrameLayout>
+</ScrollView>
