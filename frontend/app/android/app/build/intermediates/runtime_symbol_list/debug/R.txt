@@ -3094,6 +3094,11 @@ int id beginning 0x7f080054
 int id blocking 0x7f080055
 int id bottom 0x7f080056
 int id bounce 0x7f080057
+int id btnAnalyseFile 0x7f0801c5
+int id btnMarkFake 0x7f0801c6
+int id btnMarkReal 0x7f0801c7
+int id btnPickImage 0x7f0801c8
+int id btnPickVideo 0x7f0801c9
 int id btnStartOverlay 0x7f080058
 int id buttonPanel 0x7f080059
 int id cancel_button 0x7f08005a
@@ -3332,6 +3337,7 @@ int id radio 0x7f080141
 int id ratio 0x7f080142
 int id rectangles 0x7f080143
 int id report_drawn 0x7f080144
+int id resultCard 0x7f0801ca
 int id reverseSawtooth 0x7f080145
 int id right 0x7f080146
 int id rightToLeft 0x7f080147
@@ -3441,7 +3447,14 @@ int id transition_position 0x7f0801ad
 int id transition_scene_layoutid_cache 0x7f0801ae
 int id transition_transform 0x7f0801af
 int id triangle 0x7f0801b0
+int id txtAnalysisStatus 0x7f0801cb
+int id txtConfidence 0x7f0801cc
 int id txtDurationValue 0x7f0801c4
+int id txtResultDetails 0x7f0801cd
+int id txtSelectedFile 0x7f0801ce
+int id txtVerdictEmoji 0x7f0801cf
+int id txtVerdictLabel 0x7f0801d0
+int id txtVerifyStatus 0x7f0801d1
 int id unchecked 0x7f0801b1
 int id uniform 0x7f0801b2
 int id unlabeled 0x7f0801b3

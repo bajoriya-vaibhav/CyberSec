@@ -165,11 +165,238 @@
             android:textSize="15sp"
             android:text="🛡️  Enable Overlay" />
 
-        <!-- Info text -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!--  FILE ANALYSIS SECTION                                 -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="32dp"
+            android:layout_marginBottom="8dp"
+            android:text="🔬  Analyse File"
+            android:textColor="#E0E0E0"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <!-- Upload card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/card_bg"
+            android:padding="16dp">
+
+            <!-- Pick buttons row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center">
+
+                <Button
+                    android:id="@+id/btnPickImage"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="6dp"
+                    android:backgroundTint="#1A4FC3F7"
+                    android:text="🖼 Image"
+                    android:textColor="#4FC3F7"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:padding="12dp" />
+
+                <Button
+                    android:id="@+id/btnPickVideo"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="6dp"
+                    android:backgroundTint="#1A9C27B0"
+                    android:text="🎬 Video"
+                    android:textColor="#CE93D8"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:padding="12dp" />
+
+            </LinearLayout>
+
+            <!-- Selected file name -->
+            <TextView
+                android:id="@+id/txtSelectedFile"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="No file selected"
+                android:textColor="#50FFFFFF"
+                android:textSize="11sp"
+                android:gravity="center"
+                android:singleLine="true"
+                android:ellipsize="middle" />
+
+            <!-- Analyse button -->
+            <Button
+                android:id="@+id/btnAnalyseFile"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:backgroundTint="#37474F"
+                android:text="Analyse"
+                android:textColor="#90FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:enabled="false"
+                android:padding="14dp" />
+
+            <!-- Analysis status / spinner text -->
+            <TextView
+                android:id="@+id/txtAnalysisStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text=""
+                android:textColor="#70FFFFFF"
+                android:textSize="11sp"
+                android:gravity="center"
+                android:visibility="gone" />
+
+        </LinearLayout>
+
+        <!-- Result Card (hidden until result arrives) -->
+        <LinearLayout
+            android:id="@+id/resultCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="vertical"
+            android:background="@drawable/card_bg"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <!-- Verdict row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:id="@+id/txtVerdictEmoji"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="✅"
+                    android:textSize="42sp"
+                    android:paddingEnd="16dp" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/txtVerdictLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="REAL"
+                        android:textColor="#66BB6A"
+                        android:textSize="22sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/txtConfidence"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="87.3% confident"
+                        android:textColor="#B0FFFFFF"
+                        android:textSize="13sp" />
+
+                </LinearLayout>
+
+            </LinearLayout>
+
+            <!-- Detail row: frames + time -->
+            <TextView
+                android:id="@+id/txtResultDetails"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="15 frames  •  3200ms"
+                android:textColor="#50FFFFFF"
+                android:textSize="10sp"
+                android:gravity="center" />
+
+            <!-- Divider -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="14dp"
+                android:layout_marginBottom="10dp"
+                android:background="#15FFFFFF" />
+
+            <!-- Verification label -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Mark for dataset (optional):"
+                android:textColor="#70FFFFFF"
+                android:textSize="11sp"
+                android:layout_marginBottom="8dp" />
+
+            <!-- Mark Real / Fake -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnMarkReal"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="6dp"
+                    android:backgroundTint="#1B5E20"
+                    android:text="✅ Mark Real"
+                    android:textColor="#A5D6A7"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:padding="12dp" />
+
+                <Button
+                    android:id="@+id/btnMarkFake"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="6dp"
+                    android:backgroundTint="#B71C1C"
+                    android:text="🚨 Mark Fake"
+                    android:textColor="#FFCDD2"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:padding="12dp" />
+
+            </LinearLayout>
+
+            <!-- Verification status message -->
+            <TextView
+                android:id="@+id/txtVerifyStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text=""
+                android:textColor="#70FFFFFF"
+                android:textSize="11sp"
+                android:gravity="center"
+                android:visibility="gone" />
+
+        </LinearLayout>
+
+        <!-- Footer info text -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
             android:gravity="center"
             android:lineSpacingExtra="4dp"
             android:text="Settings are saved automatically.\nUse the floating overlay to start/stop analysis."

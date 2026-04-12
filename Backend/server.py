@@ -416,6 +416,170 @@ async def check_person(frame: UploadFile = File(...)):
         return JSONResponse(content={"person_detected": False, "type": "error", "count": 0})
 
 
+# ─── File Upload Analysis Endpoints ──────────────────────────────────
+
+_BACKEND_ROOT = os.path.dirname(os.path.abspath(__file__))
+_VERIFIED_DIR = os.path.join(_BACKEND_ROOT, "verified")
+_REAL_DIR = os.path.join(_VERIFIED_DIR, "real")
+_FAKE_DIR = os.path.join(_VERIFIED_DIR, "fake")
+
+
+def _ensure_verified_dirs():
+    os.makedirs(_REAL_DIR, exist_ok=True)
+    os.makedirs(_FAKE_DIR, exist_ok=True)
+
+
+def _extract_video_frames_sync(video_bytes: bytes, max_frames: int = 15) -> list:
+    """Extract up to max_frames evenly spaced PIL frames from a video in memory."""
+    import cv2
+    import numpy as np
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp.write(video_bytes)
+    tmp.flush()
+    tmp.close()
+    frames = []
+    try:
+        cap = cv2.VideoCapture(tmp.name)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total > 0:
+            step = max(1, total // max_frames)
+            idx = 0
+            while len(frames) < max_frames:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+                idx += step
+        cap.release()
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+    return frames
+
+
+@app.post("/analyze_file")
+async def analyze_file(file: UploadFile = File(...)):
+    """
+    Analyze an uploaded image or video for deepfake detection.
+
+    Accepts:
+        Image (JPEG, PNG, WEBP) → single frame analysis
+        Video (MP4, MOV, AVI, MKV) → extracts 15 evenly-spaced frames
+
+    Returns:
+        prediction, confidence, fake_probability, frames_analyzed,
+        person_detected, file_type, inference_time_ms
+    """
+    if detector is None or detector.video_detector is None:
+        raise HTTPException(status_code=503, detail="Models not loaded")
+
+    t_start = time.time()
+    data = await file.read()
+    filename = (file.filename or "").lower()
+    content_type = (file.content_type or "").lower()
+    ext = os.path.splitext(filename)[1]
+
+    VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
+    is_video = ext in VIDEO_EXTS or "video" in content_type
+
+    file_type = "video" if is_video else "image"
+    frames = []
+
+    try:
+        if is_video:
+            frames = await asyncio.to_thread(_extract_video_frames_sync, data)
+            if not frames:
+                raise ValueError("No frames extracted — is this a valid video?")
+        else:
+            frames = [Image.open(BytesIO(data)).convert("RGB")]
+    except Exception as e:
+        logger.error(f"[FILE] Decode error ({filename}): {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read file: {e}")
+
+    logger.info(f"[FILE] Analyzing {file_type}: {filename} ({len(frames)} frames)")
+
+    def _run():
+        with inference_lock:
+            result = detector.video_detector.detect(frames)
+            return result
+
+    result = await asyncio.to_thread(_run)
+    fake_prob = result.fake_probability
+    real_prob = 1.0 - fake_prob
+    prediction = "Fake" if fake_prob > 0.5 else "Real"
+    confidence = max(fake_prob, real_prob)
+    person_detected = result.metadata.get("person_detected", True)
+    inference_time = time.time() - t_start
+
+    logger.info(
+        f"[FILE] {prediction} fake={fake_prob:.4f} "
+        f"conf={confidence:.4f} frames={len(frames)} "
+        f"time={inference_time*1000:.0f}ms"
+    )
+
+    return JSONResponse(content={
+        "prediction": prediction,
+        "confidence": round(float(confidence), 4),
+        "fake_probability": round(float(fake_prob), 4),
+        "real_probability": round(float(real_prob), 4),
+        "person_detected": person_detected,
+        "frames_analyzed": len(frames),
+        "file_type": file_type,
+        "filename": file.filename,
+        "inference_time_ms": round(inference_time * 1000, 1),
+    })
+
+
+@app.post("/verify")
+async def verify_file(
+    file: UploadFile = File(...),
+    label: str = Form(...),
+):
+    """
+    Save a user-verified file to verified/real/ or verified/fake/ folder.
+    Only user-submitted labels are saved — no live streams or frames.
+
+    Args:
+        file: Image or video file
+        label: "real" or "fake"
+    """
+    label = label.strip().lower()
+    if label not in ("real", "fake"):
+        raise HTTPException(status_code=400, detail="label must be 'real' or 'fake'")
+
+    _ensure_verified_dirs()
+    dest_dir = _REAL_DIR if label == "real" else _FAKE_DIR
+
+    # Sanitize filename + avoid collisions
+    raw_name = file.filename or f"file_{int(time.time())}"
+    safe_name = "".join(c for c in raw_name if c.isalnum() or c in "._-")
+    base, ext = os.path.splitext(safe_name)
+    dest_path = os.path.join(dest_dir, safe_name)
+    counter = 1
+    while os.path.exists(dest_path):
+        dest_path = os.path.join(dest_dir, f"{base}_{counter}{ext}")
+        counter += 1
+
+    data = await file.read()
+    with open(dest_path, "wb") as f:
+        f.write(data)
+
+    relative = os.path.relpath(dest_path, _BACKEND_ROOT).replace("\\", "/")
+    logger.info(f"[VERIFY] Saved {label}: {relative} ({len(data)} bytes)")
+
+    return JSONResponse(content={
+        "saved": True,
+        "label": label,
+        "filename": os.path.basename(dest_path),
+        "relative_path": relative,
+        "size_bytes": len(data),
+    })
+
+
 @app.get("/stats")
 async def stats():
     """Server statistics."""

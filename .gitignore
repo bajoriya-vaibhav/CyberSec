@@ -1,3 +1,7 @@
 # Backend Model Weights
 Backend/weight/
 !Backend/weight/.gitkeep
+
+# User-verified dataset files
+Backend/verified/
+!Backend/verified/.gitkeep
