@@ -132,24 +132,25 @@ class CvitDetector(BaseDetector):
         
         # 1. Fast Haar face check
         if self.haar_face is not None:
+            # Increased minNeighbors from 4 to 6 for stricter face detection
             faces = self.haar_face.detectMultiScale(
-                gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30)
+                gray, scaleFactor=1.1, minNeighbors=6, minSize=(30, 30)
             )
             if len(faces) > 0:
-                logger.debug(f"has_person: {len(faces)} face(s) via Haar")
+                logger.info(f"has_person: {len(faces)} face(s) via Haar (threshold=6 neighbors)")
                 return {"person_detected": True, "type": "face", "count": len(faces)}
         
         # 2. Upper body check
         if self.haar_upper_body is not None:
-            # Resize for speed
             h, w = gray.shape
             scale = min(1.0, 480.0 / max(h, w))
             small = cv2.resize(gray, None, fx=scale, fy=scale) if scale < 1.0 else gray
+            # Increased minNeighbors from 3 to 5 for stricter upper body
             bodies = self.haar_upper_body.detectMultiScale(
-                small, scaleFactor=1.05, minNeighbors=3, minSize=(40, 40)
+                small, scaleFactor=1.05, minNeighbors=5, minSize=(40, 40)
             )
             if len(bodies) > 0:
-                logger.debug(f"has_person: {len(bodies)} body(ies) via Haar upper body")
+                logger.info(f"has_person: {len(bodies)} body(ies) via Haar upper body (threshold=5 neighbors)")
                 return {"person_detected": True, "type": "upper_body", "count": len(bodies)}
         
         # 3. HOG full person check
@@ -157,12 +158,22 @@ class CvitDetector(BaseDetector):
             h, w = frame_rgb.shape[:2]
             scale = min(1.0, 400.0 / max(h, w))
             small = cv2.resize(frame_rgb, None, fx=scale, fy=scale) if scale < 1.0 else frame_rgb
-            rects, _ = self.hog_person.detectMultiScale(
+            rects, weights = self.hog_person.detectMultiScale(
                 small, winStride=(8, 8), padding=(4, 4), scale=1.05
             )
-            if len(rects) > 0:
-                logger.debug(f"has_person: {len(rects)} person(s) via HOG")
-                return {"person_detected": True, "type": "person", "count": len(rects)}
+            # Filter HOG detections by a confidence weight threshold (e.g. > 0.3)
+            valid_rects = []
+            for i, rect in enumerate(rects):
+                weight = weights[i][0] if isinstance(weights[i], (list, np.ndarray)) else weights[i]
+                logger.info(f"has_person HOG candidate: weight={weight:.3f}")
+                if weight > 0.3:  # HOG Confidence Threshold
+                    valid_rects.append(rect)
+                else:
+                    logger.info(f"has_person HOG candidate rejected (weight {weight:.3f} <= 0.3)")
+                    
+            if len(valid_rects) > 0:
+                logger.info(f"has_person: {len(valid_rects)} person(s) via HOG (threshold weight > 0.3)")
+                return {"person_detected": True, "type": "person", "count": len(valid_rects)}
         
         return {"person_detected": False, "type": "none", "count": 0}
     
