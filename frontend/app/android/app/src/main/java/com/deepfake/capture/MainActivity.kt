@@ -65,6 +65,7 @@ class MainActivity : AppCompatActivity() {
     // File analysis UI
     private lateinit var txtSelectedFile: TextView
     private lateinit var btnAnalyseFile: Button
+    private lateinit var progressBar: android.widget.ProgressBar
     private lateinit var txtAnalysisStatus: TextView
     private lateinit var resultCard: LinearLayout
     private lateinit var txtVerdictEmoji: TextView
@@ -121,6 +122,7 @@ class MainActivity : AppCompatActivity() {
         // ── File Analysis UI ───────────────────────────────────
         txtSelectedFile = findViewById(R.id.txtSelectedFile)
         btnAnalyseFile = findViewById(R.id.btnAnalyseFile)
+        progressBar = findViewById(R.id.progressBar)
         txtAnalysisStatus = findViewById(R.id.txtAnalysisStatus)
         resultCard = findViewById(R.id.resultCard)
         txtVerdictEmoji = findViewById(R.id.txtVerdictEmoji)
@@ -234,7 +236,8 @@ class MainActivity : AppCompatActivity() {
         scope.launch {
             // Lock UI
             btnAnalyseFile.isEnabled = false
-            txtAnalysisStatus.text = "⏳ Uploading and analysing…"
+            progressBar.visibility = View.VISIBLE
+            txtAnalysisStatus.text = "Uploading and analysing…"
             txtAnalysisStatus.visibility = View.VISIBLE
             resultCard.visibility = View.GONE
             txtVerifyStatus.visibility = View.GONE
@@ -301,6 +304,7 @@ class MainActivity : AppCompatActivity() {
         txtConfidence.text = "${"%.1f".format(confidence * 100)}% confident"
         txtResultDetails.text = "$frames ${fileType} frame${if (frames != 1) "s" else ""}  •  ${"%.0f".format(timeMs)}ms"
 
+        progressBar.visibility = View.GONE
         txtAnalysisStatus.visibility = View.GONE
         resultCard.visibility = View.VISIBLE
         btnAnalyseFile.isEnabled = true
@@ -313,6 +317,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showError(msg: String) {
+        progressBar.visibility = View.GONE
         txtAnalysisStatus.text = "❌ $msg"
         btnAnalyseFile.isEnabled = true
     }

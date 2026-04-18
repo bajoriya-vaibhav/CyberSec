@@ -384,12 +384,7 @@ class OverlayManager(private val context: Context) {
             orientation = LinearLayout.VERTICAL
             visibility = if (isCapturing || isScanning) View.VISIBLE else View.GONE
         }
-        streamInfoText = TextView(context).apply {
-            text = if (isScanning) "👁 Scanning for person…" else "Waiting…"
-            setTextColor(Color.parseColor("#60FFFFFF")); textSize = 10f
-            setPadding(0, dp(2), 0, dp(4))
-        }
-        streamSection!!.addView(streamInfoText)
+        // Removed duplicated streamInfoText. statusText now handles this completely.
         root.addView(streamSection)
 
         // Result section
@@ -443,20 +438,17 @@ class OverlayManager(private val context: Context) {
         }
 
         // Auto toggle
-        togglesRow.addView(TextView(context).apply {
-            text = "🤖"; textSize = 12f; setPadding(0, 0, dp(4), 0)
-        })
         autoToggleBtn = TextView(context).apply {
-            text = if (isAutoEnabled) "AUTO" else "MANUAL"
+            text = if (isAutoEnabled) "AUTO-SCAN: ON" else "AUTO-SCAN: OFF"
             setTextColor(if (isAutoEnabled) Color.parseColor("#4FC3F7") else Color.parseColor("#78909C"))
             textSize = 9f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
-            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
             background = makeToggleBg(isAutoEnabled, "#4FC3F7")
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) }
             setOnClickListener {
                 isAutoEnabled = !isAutoEnabled
                 prefs.edit().putBoolean(KEY_AUTO_MODE, isAutoEnabled).apply()
-                text = if (isAutoEnabled) "AUTO" else "MANUAL"
+                text = if (isAutoEnabled) "AUTO-SCAN: ON" else "AUTO-SCAN: OFF"
                 setTextColor(if (isAutoEnabled) Color.parseColor("#4FC3F7") else Color.parseColor("#78909C"))
                 background = makeToggleBg(isAutoEnabled, "#4FC3F7")
                 onAutoToggleChanged?.invoke(isAutoEnabled)
@@ -465,20 +457,17 @@ class OverlayManager(private val context: Context) {
         togglesRow.addView(autoToggleBtn)
 
         // Audio toggle
-        togglesRow.addView(TextView(context).apply {
-            text = "🎙"; textSize = 12f; setPadding(0, 0, dp(4), 0)
-        })
         audioToggleBtn = TextView(context).apply {
-            text = if (isAudioEnabled) "ON" else "OFF"
+            text = if (isAudioEnabled) "AUDIO: ON" else "AUDIO: OFF"
             setTextColor(if (isAudioEnabled) Color.parseColor("#66BB6A") else Color.parseColor("#78909C"))
             textSize = 9f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
-            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
             background = makeToggleBg(isAudioEnabled, "#66BB6A")
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener {
                 isAudioEnabled = !isAudioEnabled
                 prefs.edit().putBoolean(KEY_AUDIO_ENABLED, isAudioEnabled).apply()
-                text = if (isAudioEnabled) "ON" else "OFF"
+                text = if (isAudioEnabled) "AUDIO: ON" else "AUDIO: OFF"
                 setTextColor(if (isAudioEnabled) Color.parseColor("#66BB6A") else Color.parseColor("#78909C"))
                 background = makeToggleBg(isAudioEnabled, "#66BB6A")
                 onAudioToggleChanged?.invoke(isAudioEnabled)
@@ -492,7 +481,7 @@ class OverlayManager(private val context: Context) {
         val btnRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(6), 0, 0); gravity = Gravity.CENTER
         }
-        startBtn = makeActionBtn("▶ Start", "#2E7D32") {
+        startBtn = makeActionBtn("START", "#2E7D32") {
             val url = prefs.getString("server_url", "") ?: ""
             if (url.isNotBlank()) onStartCapture?.invoke(url)
             else updateStatus("⚠ Set URL in app")
@@ -500,7 +489,7 @@ class OverlayManager(private val context: Context) {
         startBtn!!.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(4) }
         btnRow.addView(startBtn)
 
-        stopBtn = makeActionBtn("⏹ Stop", "#C62828") { onStopCapture?.invoke() }
+        stopBtn = makeActionBtn("STOP", "#C62828") { onStopCapture?.invoke() }
         stopBtn!!.alpha = 0.4f; stopBtn!!.isEnabled = false
         stopBtn!!.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(4) }
         btnRow.addView(stopBtn)

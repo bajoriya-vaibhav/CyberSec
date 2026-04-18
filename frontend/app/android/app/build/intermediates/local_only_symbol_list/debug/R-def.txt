@@ -27,6 +27,7 @@ id btnPickImage
 id btnPickVideo
 id btnStartOverlay
 id editServerUrl
+id progressBar
 id resultCard
 id seekDuration
 id txtAnalysisStatus
