@@ -14,7 +14,7 @@ class Config:
     CVIT_FP16 = False                              # Use half precision (faster on GPU)
     
     # Gemini API Configuration (optional, disabled by default)
-    GEMINI_API_KEY = "AIzaSyDf_MYvPBqX2NDjZ68_OOVybO68tKkPu2s"
+    GEMINI_API_KEY = ""
     GEMINI_MODEL = "gemini-2.5-flash"
     GEMINI_FRAMES = 7
     USE_GEMINI = False
