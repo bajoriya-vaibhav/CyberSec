@@ -28,6 +28,8 @@ from PIL import Image
 
 from detector import DeepFakeDetector
 from config import Config
+from concurrent.futures import ThreadPoolExecutor
+from detectors.watermark_detector import check_watermark_llm
 
 # ─── Logging ─────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -128,8 +130,17 @@ def _run_ws_inference(frame_jpeg_list: list, audio_wav_bytes: bytes = None) -> d
         else:
             images = all_images
 
+        # ── Launch LLM watermark check in parallel (sends 1 frame to Gemini) ──
+        wm_future = None
+        if images:
+            _wm_pool = ThreadPoolExecutor(max_workers=1)
+            # Send the middle frame — most likely to show watermark clearly
+            mid_frame = images[len(images) // 2]
+            wm_future = _wm_pool.submit(check_watermark_llm, mid_frame)
+
         person_detected = True
 
+        # ── Video model inference (GenConViT) — runs concurrently with LLM ──
         if images:
             try:
                 video_result = detector.video_detector.detect(images)
@@ -161,30 +172,63 @@ def _run_ws_inference(frame_jpeg_list: list, audio_wav_bytes: bytes = None) -> d
                     try: os.unlink(tmp_audio.name)
                     except OSError: pass
 
-        # ── Fusion ──
-        if video_score is not None and audio_score is not None:
-            from detectors.base_detector import DetectionResult as DR
-            v_r = DR(fake_probability=video_score, real_probability=1.0 - video_score)
-            a_r = DR(fake_probability=audio_score, real_probability=1.0 - audio_score)
-            fused = detector.fusion_strategy.fuse(v_r, a_r)
-            final_fake = fused.fake_probability
-            final_confidence = fused.confidence
-            security_alert = fused.metadata.get('security_alert')
-            threat_vector = fused.metadata.get('threat_vector')
-            prediction = "Suspicious" if security_alert == 'MISMATCH_DETECTED' else \
-                         ("Fake" if final_fake > 0.5 else "Real")
-        elif video_score is not None:
-            final_fake = video_score
-            final_confidence = max(video_score, 1.0 - video_score)
-            prediction = "Fake" if video_score > 0.5 else "Real"
-        elif audio_score is not None:
-            final_fake = audio_score
-            final_confidence = max(audio_score, 1.0 - audio_score)
-            prediction = "Fake" if audio_score > 0.5 else "Real"
+        # ── Collect LLM watermark result (should be done by now) ──
+        wm_detected = False
+        wm_confidence = 0.0
+        wm_info = None
+        if wm_future is not None:
+            try:
+                wm_result = wm_future.result(timeout=15.0)
+                wm_detected = wm_result.get("watermark_detected", False)
+                wm_confidence = wm_result.get("confidence", 0.0)
+                wm_info = wm_result
+                logger.info(
+                    f"[WS #{req_id}] LLM watermark: detected={wm_detected}, "
+                    f"conf={wm_confidence:.2f}"
+                )
+            except Exception as e:
+                logger.warning(f"[WS #{req_id}] LLM watermark check failed: {e}")
+            finally:
+                _wm_pool.shutdown(wait=False)
+
+        # ── Decision: simple thresholding ──
+        # If LLM says Veo watermark with confidence > 0.75 → Fake at 90%+
+        # Otherwise → use model/fusion result untouched
+        if wm_detected and wm_confidence > 0.75:
+            final_fake = 0.90 + min(wm_confidence, 1.0) * 0.08
+            final_confidence = final_fake
+            prediction = "Fake"
+            security_alert = "AI_WATERMARK_DETECTED"
+            threat_vector = "ai_watermark_veo"
+            logger.info(
+                f"[WS #{req_id}] WATERMARK OVERRIDE: llm_conf={wm_confidence:.2f}, "
+                f"final={final_fake:.3f} (model was {video_score})"
+            )
         else:
-            prediction = "Unknown"
-            final_confidence = 0.0
-            final_fake = 0.5
+            # Normal fusion path — model result only
+            if video_score is not None and audio_score is not None:
+                from detectors.base_detector import DetectionResult as DR
+                v_r = DR(fake_probability=video_score, real_probability=1.0 - video_score)
+                a_r = DR(fake_probability=audio_score, real_probability=1.0 - audio_score)
+                fused = detector.fusion_strategy.fuse(v_r, a_r)
+                final_fake = fused.fake_probability
+                final_confidence = fused.confidence
+                security_alert = fused.metadata.get('security_alert')
+                threat_vector = fused.metadata.get('threat_vector')
+                prediction = "Suspicious" if security_alert == 'MISMATCH_DETECTED' else \
+                             ("Fake" if final_fake > 0.5 else "Real")
+            elif video_score is not None:
+                final_fake = video_score
+                final_confidence = max(video_score, 1.0 - video_score)
+                prediction = "Fake" if video_score > 0.5 else "Real"
+            elif audio_score is not None:
+                final_fake = audio_score
+                final_confidence = max(audio_score, 1.0 - audio_score)
+                prediction = "Fake" if audio_score > 0.5 else "Real"
+            else:
+                prediction = "Unknown"
+                final_confidence = 0.0
+                final_fake = 0.5
 
         inference_time = time.time() - t_start
         total_inference_time += inference_time
@@ -212,6 +256,14 @@ def _run_ws_inference(frame_jpeg_list: list, audio_wav_bytes: bytes = None) -> d
             "inference_time_ms": round(inference_time * 1000, 1),
             "frames_analyzed": len(images),
         }
+
+        # Attach watermark info if detected
+        if wm_info and wm_detected:
+            result["watermark_info"] = {
+                "detected": True,
+                "llm_confidence": wm_confidence,
+                "reasoning": wm_info.get("reasoning", ""),
+            }
 
         logger.info(f"[WS #{req_id}] Result: {prediction} "
                     f"(conf={final_confidence:.3f}, person={person_detected}, "
@@ -502,17 +554,59 @@ async def analyze_file(file: UploadFile = File(...)):
 
     logger.info(f"[FILE] Analyzing {file_type}: {filename} ({len(frames)} frames)")
 
+    # ── Launch LLM watermark check in parallel ──
+    wm_future = None
+    if frames:
+        _wm_pool = ThreadPoolExecutor(max_workers=1)
+        mid_frame = frames[len(frames) // 2]
+        wm_future = _wm_pool.submit(check_watermark_llm, mid_frame)
+
+    # ── Model inference (runs concurrently with LLM call) ──
     def _run():
         with inference_lock:
-            result = detector.video_detector.detect(frames)
-            return result
+            return detector.video_detector.detect(frames)
 
     result = await asyncio.to_thread(_run)
     fake_prob = result.fake_probability
-    real_prob = 1.0 - fake_prob
-    prediction = "Fake" if fake_prob > 0.5 else "Real"
-    confidence = max(fake_prob, real_prob)
     person_detected = result.metadata.get("person_detected", True)
+
+    # ── Collect LLM watermark result ──
+    wm_detected = False
+    wm_confidence = 0.0
+    wm_info = None
+    if wm_future is not None:
+        try:
+            wm_result = wm_future.result(timeout=15.0)
+            wm_detected = wm_result.get("watermark_detected", False)
+            wm_confidence = wm_result.get("confidence", 0.0)
+            wm_info = wm_result
+            logger.info(
+                f"[FILE] LLM watermark: detected={wm_detected}, "
+                f"conf={wm_confidence:.2f}"
+            )
+        except Exception as e:
+            logger.warning(f"[FILE] LLM watermark check failed: {e}")
+        finally:
+            _wm_pool.shutdown(wait=False)
+
+    # ── Decision: simple thresholding ──
+    security_alert = None
+    if wm_detected and wm_confidence > 0.75:
+        # Watermark found → override with Fake at 90%+
+        fake_prob = 0.90 + min(wm_confidence, 1.0) * 0.08
+        prediction = "Fake"
+        confidence = fake_prob
+        security_alert = "AI_WATERMARK_DETECTED"
+        logger.info(
+            f"[FILE] WATERMARK OVERRIDE: llm_conf={wm_confidence:.2f}, "
+            f"final={fake_prob:.3f} (model was {result.fake_probability:.3f})"
+        )
+    else:
+        # No watermark → use model result directly
+        prediction = "Fake" if fake_prob > 0.5 else "Real"
+        confidence = max(fake_prob, 1.0 - fake_prob)
+
+    real_prob = 1.0 - fake_prob
     inference_time = time.time() - t_start
 
     logger.info(
@@ -521,7 +615,7 @@ async def analyze_file(file: UploadFile = File(...)):
         f"time={inference_time*1000:.0f}ms"
     )
 
-    return JSONResponse(content={
+    response = {
         "prediction": prediction,
         "confidence": round(float(confidence), 4),
         "fake_probability": round(float(fake_prob), 4),
@@ -531,7 +625,18 @@ async def analyze_file(file: UploadFile = File(...)):
         "file_type": file_type,
         "filename": file.filename,
         "inference_time_ms": round(inference_time * 1000, 1),
-    })
+    }
+
+    if security_alert:
+        response["security_alert"] = security_alert
+    if wm_info and wm_detected:
+        response["watermark_info"] = {
+            "detected": True,
+            "llm_confidence": wm_confidence,
+            "reasoning": wm_info.get("reasoning", ""),
+        }
+
+    return JSONResponse(content=response)
 
 
 @app.post("/verify")
