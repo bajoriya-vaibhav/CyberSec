@@ -28,7 +28,8 @@ class Config:
     
     # Fusion strategy selection
     # Options: 'security_first', 'weighted', 'max', 'adaptive', 'rl_adaptive', 'advanced_rl'
-    FUSION_MODE = 'rl_adaptive'  # Use simple RL with feedback learning
+    FUSION_MODE = 'security_first'  # Use security-first fusion (RL disabled for final decision)
+    DEMO_MODE = False           
     
     # Fusion weights — GenConViT is primary, audio is supplementary
     VIDEO_WEIGHT = 0.95  # GenConViT video model (primary)
@@ -48,6 +49,8 @@ class Config:
     
     # Thresholds
     FAKE_THRESHOLD = 0.5      # Above this is considered fake
+    SUSPICIOUS_THRESHOLD_LOW = 0.45  # Probabilities between these thresholds
+    SUSPICIOUS_THRESHOLD_HIGH = 0.55 # are labeled as 'Suspicious'
     HIGH_CONFIDENCE_THRESHOLD = 0.75  # High confidence threshold
     
     # Temporary file settings

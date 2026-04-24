@@ -85,6 +85,15 @@ class DeepFakeDetector:
         self.audio_detector = AudioDetector(Config.AUDIO_MODEL)
         logger.info("Wav2Vec2 audio detector loaded successfully")
         
+        # Always initialize RL system for feedback collection (shadow learning)
+        # but only use it for fusion if FUSION_MODE is 'rl_adaptive'
+        self.rl_system = RLAdaptiveFusion(
+            initial_video_weight=Config.VIDEO_WEIGHT,
+            learning_rate=Config.RL_LEARNING_RATE
+        )
+        if Config.RL_LOAD_PREVIOUS:
+            self.rl_system.load_model()
+
         # Initialize fusion strategy based on config
         if fusion_strategy is None:
             if Config.FUSION_MODE == 'security_first':
@@ -101,15 +110,9 @@ class DeepFakeDetector:
             elif Config.FUSION_MODE == 'adaptive':
                 self.fusion_strategy = AdaptiveFusionStrategy()
             elif Config.FUSION_MODE == 'rl_adaptive':
-                # Simple Reinforcement Learning based adaptive fusion
-                self.fusion_strategy = RLAdaptiveFusion(
-                    initial_video_weight=Config.VIDEO_WEIGHT,
-                    learning_rate=Config.RL_LEARNING_RATE
-                )
-                # Load previously learned weights if enabled
-                if Config.RL_LOAD_PREVIOUS:
-                    self.fusion_strategy.load_model()
-                logger.info("RL Adaptive Fusion initialized")
+                # Use the initialized RL system for active fusion
+                self.fusion_strategy = self.rl_system
+                logger.info("RL Adaptive Fusion enabled for active decision making")
             else:
                 raise ValueError(f"Unknown fusion mode: {Config.FUSION_MODE}")
         else:
